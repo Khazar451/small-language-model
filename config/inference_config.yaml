@@ -1,0 +1,40 @@
+# Inference Configuration
+inference:
+  # Model loading
+  model_path: "outputs/checkpoints/best_model"
+  tokenizer_path: "outputs/checkpoints/best_model"
+  use_pretrained: false
+  pretrained_model_name: "gpt2"
+
+  # Generation settings (for text generation tasks)
+  generation:
+    max_new_tokens: 200
+    min_new_tokens: 10
+    temperature: 0.8             # Higher = more random, lower = more deterministic
+    top_k: 50                    # Keep top-k tokens for sampling (0 = disabled)
+    top_p: 0.9                   # Nucleus sampling threshold
+    repetition_penalty: 1.2      # Penalty for repeating tokens
+    do_sample: true              # Use sampling (false = greedy/beam search)
+    num_beams: 1                 # Beam search width (1 = greedy)
+    num_return_sequences: 1      # Number of sequences to generate
+    early_stopping: false        # Stop at first EOS token in beam search
+    pad_token_id: 50256          # GPT-2 uses EOS as PAD
+    eos_token_id: 50256
+
+  # Batch inference settings
+  batch_size: 16
+  max_seq_length: 512
+
+  # Output settings
+  output_dir: "outputs/predictions"
+  output_format: "json"          # "json" or "txt"
+
+  # Device settings
+  device: "auto"                 # "auto", "cpu", "gpu"
+  use_fp16: false
+
+  # Q&A specific settings
+  qa:
+    max_answer_length: 100
+    n_best_size: 20
+    null_score_diff_threshold: 0.0

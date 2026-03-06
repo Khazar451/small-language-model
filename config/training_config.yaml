@@ -1,0 +1,60 @@
+# Training Configuration
+training:
+  # Basic training parameters
+  batch_size: 8
+  gradient_accumulation_steps: 4   # Effective batch size = batch_size * gradient_accumulation_steps
+  num_epochs: 3
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_steps: -1                    # -1 means train for full num_epochs
+
+  # Optimizer settings
+  optimizer: "adamw"               # "adam" or "adamw"
+  adam_epsilon: 1.0e-8
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  max_grad_norm: 1.0               # Gradient clipping
+
+  # Learning rate scheduler
+  lr_scheduler: "linear"           # "linear", "cosine", "constant"
+  num_cycles: 0.5                  # For cosine scheduler
+
+  # Data settings
+  train_data_path: "data/train.txt"
+  val_data_path: "data/val.txt"
+  test_data_path: "data/test.txt"
+  tokenizer_name: "gpt2"          # Tokenizer to use
+  max_seq_length: 512
+
+  # Checkpointing
+  output_dir: "outputs/checkpoints"
+  save_steps: 500
+  save_total_limit: 3              # Keep only this many checkpoints
+  load_best_model_at_end: true
+  metric_for_best_model: "loss"
+  greater_is_better: false
+
+  # Logging
+  logging_dir: "outputs/logs"
+  logging_steps: 100
+  eval_steps: 500
+
+  # Early stopping
+  early_stopping: true
+  early_stopping_patience: 3
+
+  # Mixed precision training
+  fp16: false                      # Enable float16 training
+  bf16: false                      # Enable bfloat16 training
+
+  # Seed for reproducibility
+  seed: 42
+
+  # Device settings
+  use_gpu: true
+  num_gpus: 1
+
+  # Fine-tuning specific
+  freeze_base_model: false         # Freeze pre-trained weights
+  num_frozen_layers: 0             # Number of layers to freeze from bottom
