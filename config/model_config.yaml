@@ -1,0 +1,32 @@
+# Model Configuration
+model:
+  # Architecture type: 'transformer' or 'pretrained'
+  type: transformer
+
+  # Transformer architecture settings
+  vocab_size: 50257           # Vocabulary size (GPT-2 default)
+  d_model: 768                # Embedding dimension
+  num_heads: 12               # Number of attention heads
+  num_layers: 12              # Number of transformer layers
+  d_ff: 3072                  # Feed-forward hidden dimension
+  max_seq_length: 1024        # Maximum sequence length
+  dropout_rate: 0.1           # Dropout probability
+  attention_dropout: 0.1      # Attention-specific dropout
+
+  # Pre-trained model settings (used when type: 'pretrained')
+  pretrained_model_name: "gpt2"   # HuggingFace model name
+  # Options: "gpt2", "gpt2-medium", "bert-base-uncased",
+  #          "distilbert-base-uncased", "gpt2-large"
+
+  # Task-specific head configuration
+  task: "text_generation"
+  # Options: "text_generation", "question_answering",
+  #          "sentiment_analysis", "sequence_classification"
+
+  num_labels: 2               # For classification tasks
+
+  # Positional encoding type
+  positional_encoding: "learned"   # "learned" or "sinusoidal"
+
+  # Activation function
+  activation: "gelu"          # "gelu" or "relu"
