@@ -169,6 +169,73 @@ class TestTextDataset:
         with pytest.raises(FileNotFoundError):
             TextDataset("/nonexistent/path.txt", simple_tokenizer)
 
+    def test_utf8_bom_encoding(self, simple_tokenizer):
+        """TextDataset should load files encoded as UTF-8 with BOM (utf-8-sig)."""
+        text = "Hello world. " * 50
+        tmpfile = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8-sig"
+        )
+        tmpfile.write(text)
+        tmpfile.close()
+        try:
+            from src.data.dataset import TextDataset
+            dataset = TextDataset(tmpfile.name, simple_tokenizer, max_seq_length=32)
+            assert len(dataset) > 0
+        finally:
+            os.unlink(tmpfile.name)
+
+    def test_utf16_encoding(self, simple_tokenizer):
+        """TextDataset should load files encoded as UTF-16."""
+        text = "Hello world. " * 50
+        tmpfile = tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".txt", delete=False
+        )
+        tmpfile.write(text.encode("utf-16"))
+        tmpfile.close()
+        try:
+            from src.data.dataset import TextDataset
+            dataset = TextDataset(tmpfile.name, simple_tokenizer, max_seq_length=32)
+            assert len(dataset) > 0
+        finally:
+            os.unlink(tmpfile.name)
+
+    def test_latin1_encoding(self, simple_tokenizer):
+        """TextDataset should load files encoded as Latin-1."""
+        text = "café naïve résumé. " * 50
+        tmpfile = tempfile.NamedTemporaryFile(
+            mode="wb", suffix=".txt", delete=False
+        )
+        tmpfile.write(text.encode("latin-1"))
+        tmpfile.close()
+        try:
+            from src.data.dataset import TextDataset
+            dataset = TextDataset(tmpfile.name, simple_tokenizer, max_seq_length=32)
+            assert len(dataset) > 0
+        finally:
+            os.unlink(tmpfile.name)
+
+    def test_unsupported_encoding_raises(self, simple_tokenizer):
+        """TextDataset should raise ValueError when all encodings fail."""
+        from unittest.mock import patch
+        from src.data.dataset import TextDataset
+
+        # Create a real (empty) temp file so os.path.exists passes, then
+        # patch open to always raise UnicodeDecodeError so every encoding fails.
+        tmpfile = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        )
+        tmpfile.write("x")
+        tmpfile.close()
+        try:
+            with patch(
+                "builtins.open",
+                side_effect=UnicodeDecodeError("test", b"", 0, 1, "forced"),
+            ):
+                with pytest.raises(ValueError, match="Unable to decode"):
+                    TextDataset(tmpfile.name, simple_tokenizer)
+        finally:
+            os.unlink(tmpfile.name)
+
 
 # ---------------------------------------------------------------------------
 # ClassificationDataset tests

@@ -59,14 +59,33 @@ class TextDataset:
     def _load_and_tokenize(self) -> List[Dict[str, np.ndarray]]:
         """Load text file and create tokenized chunks.
 
+        Automatically detects file encoding by trying multiple encodings in
+        order: utf-8, utf-8-sig (UTF-8 with BOM), utf-16, latin-1, iso-8859-1.
+
         Returns:
             List of dictionaries with 'input_ids' and 'attention_mask'.
+
+        Raises:
+            FileNotFoundError: If the data file does not exist.
+            ValueError: If the file cannot be decoded with any supported encoding.
         """
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"Data file not found: {self.file_path}")
 
-        with open(self.file_path, "r", encoding="utf-8") as f:
-            text = f.read()
+        _ENCODINGS = ["utf-8", "utf-8-sig", "utf-16", "latin-1", "iso-8859-1"]
+        for enc in _ENCODINGS:
+            try:
+                with open(self.file_path, "r", encoding=enc) as f:
+                    text = f.read()
+                logger.info("Loaded '%s' using encoding '%s'", self.file_path, enc)
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        else:
+            raise ValueError(
+                f"Unable to decode '{self.file_path}' with any of the supported "
+                f"encodings: {_ENCODINGS}"
+            )
 
         # Tokenize the full text
         encoding = self.tokenizer(
