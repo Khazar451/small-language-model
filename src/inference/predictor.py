@@ -327,7 +327,7 @@ class Predictor:
         """Load a predictor from a saved model directory.
 
         Args:
-            model_path: Path to the saved model (HuggingFace format or custom).
+            model_path: Path to the saved model directory (custom SmallTransformer format).
             task: Task type.
             num_labels: Number of classification labels.
             **kwargs: Additional arguments passed to Predictor.
@@ -336,17 +336,23 @@ class Predictor:
             Predictor instance.
         """
         from transformers import AutoTokenizer
+        from src.model.transformer import SmallTransformer
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        # Load the custom SmallTransformer model directly
+        model = SmallTransformer.load_pretrained(model_path)
+
+        # Try to load the tokenizer saved alongside the model;
+        # fall back to the gpt2 tokenizer if none was saved there.
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+        except OSError:
+            logger.warning(
+                "No tokenizer found at %s; falling back to 'gpt2' tokenizer.",
+                model_path,
+            )
+            tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-
-        # Try to load as HuggingFace model first, then as custom model
-        try:
-            from src.model.pretrained_wrapper import PretrainedModelWrapper
-            model = PretrainedModelWrapper.load_finetuned(model_path, task, num_labels)
-        except Exception:
-            from src.model.transformer import SmallTransformer
-            model = SmallTransformer.load_pretrained(model_path)
 
         return cls(model=model, tokenizer=tokenizer, task=task, **kwargs)

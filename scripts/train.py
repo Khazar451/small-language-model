@@ -156,6 +156,10 @@ def main():
     history = trainer.train()
     logger.info("Training complete. History: %s", history)
 
+    # Save tokenizer alongside the model so inference can reload it
+    tokenizer.save_pretrained(output_dir)
+    logger.info("Tokenizer saved to %s", output_dir)
+
 
 if __name__ == "__main__":
     main()
