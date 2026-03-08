@@ -72,6 +72,8 @@ class Trainer:
         metric_for_best_model: str = "val_loss",
         greater_is_better: bool = False,
         callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
+        mixed_precision: Optional[str] = None,
+        use_gradient_checkpointing: bool = False,
     ):
         self.model = model
         self.train_dataset = train_dataset
@@ -87,6 +89,19 @@ class Trainer:
         self.early_stopping_patience = early_stopping_patience
         self.metric_for_best_model = metric_for_best_model
         self.greater_is_better = greater_is_better
+
+        # Configure mixed precision if requested
+        if mixed_precision is not None:
+            from src.training.distributed import configure_mixed_precision
+            configure_mixed_precision(mixed_precision)
+            logger.info("Trainer: mixed precision enabled (%s)", mixed_precision)
+        self.mixed_precision = mixed_precision
+
+        # Enable gradient checkpointing on the model if requested and supported
+        if use_gradient_checkpointing and hasattr(model, "config"):
+            model.config.gradient_checkpointing = True
+            logger.info("Trainer: gradient checkpointing enabled")
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Build optimizer
         if isinstance(optimizer, str):
