@@ -175,6 +175,77 @@ class TransformerConfig:
         }
 
 
+# ---------------------------------------------------------------------------
+# Predefined model size configurations
+# ---------------------------------------------------------------------------
+
+#: ~30M parameter configuration (d=256, L=4, H=8).
+SMALL_CONFIG = TransformerConfig(
+    vocab_size=50257,
+    d_model=256,
+    num_heads=8,
+    num_layers=4,
+    d_ff=1024,
+    max_seq_length=1024,
+)
+
+#: ~85M parameter configuration (d=512, L=6, H=8).
+MEDIUM_CONFIG = TransformerConfig(
+    vocab_size=50257,
+    d_model=512,
+    num_heads=8,
+    num_layers=6,
+    d_ff=2048,
+    max_seq_length=1024,
+)
+
+#: ~117M parameter configuration (d=768, L=12, H=12) — default.
+LARGE_CONFIG = TransformerConfig(
+    vocab_size=50257,
+    d_model=768,
+    num_heads=12,
+    num_layers=12,
+    d_ff=3072,
+    max_seq_length=1024,
+)
+
+#: ~345M parameter configuration (d=1024, L=24, H=16).
+XL_CONFIG = TransformerConfig(
+    vocab_size=50257,
+    d_model=1024,
+    num_heads=16,
+    num_layers=24,
+    d_ff=4096,
+    max_seq_length=1024,
+)
+
+#: ~3B parameter configuration (d=2048, L=24, H=32).
+#: Requires gradient_checkpointing and mixed precision for typical GPU memory.
+CONFIG_3B = TransformerConfig(
+    vocab_size=50257,
+    d_model=2048,
+    num_heads=32,
+    num_layers=24,
+    d_ff=8192,
+    max_seq_length=2048,
+    gradient_checkpointing=True,
+    use_mixed_precision=True,
+)
+
+#: ~5B parameter configuration (d=2560, L=32, H=32).
+#: Requires gradient_checkpointing, mixed precision, and distributed training.
+CONFIG_5B = TransformerConfig(
+    vocab_size=50257,
+    d_model=2560,
+    num_heads=32,
+    num_layers=32,
+    d_ff=10240,
+    max_seq_length=2048,
+    gradient_checkpointing=True,
+    use_mixed_precision=True,
+)
+
+
 class MultiHeadAttention(tf.keras.layers.Layer):
     """Multi-head self-attention mechanism.
 
@@ -549,7 +620,7 @@ def create_padding_mask(token_ids: tf.Tensor, pad_token_id: int = 0) -> tf.Tenso
 
 
 class SmallTransformer(tf.keras.Model):
-    """Small transformer-based language model.
+    """Transformer-based language model, scalable from ~30M to ~5B parameters.
 
     A GPT-style decoder-only transformer that can be used for text generation,
     sequence classification, sentiment analysis, and question answering.
