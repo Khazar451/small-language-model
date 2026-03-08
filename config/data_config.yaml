@@ -1,0 +1,63 @@
+data:
+  # ---------------------------------------------------------------------------
+  # Data sources
+  # ---------------------------------------------------------------------------
+  sources:
+    - type: "local"
+      path: "data/train.txt"
+      format: "text"
+
+    - type: "local"
+      path: "data/books/"
+      format: "text"
+      recursive: true
+
+    # Uncomment to add HuggingFace datasets:
+    # - type: "huggingface"
+    #   dataset: "openwebtext"
+    #   split: "train"
+    #
+    # - type: "huggingface"
+    #   dataset: "the_pile"
+    #   subset: "arxiv"
+
+  # ---------------------------------------------------------------------------
+  # Preprocessing
+  # ---------------------------------------------------------------------------
+  preprocessing:
+    clean_text: true
+    remove_html: true
+    remove_urls: true
+    remove_duplicates: true
+    min_length: 50          # minimum character length
+    max_length: 100000      # maximum character length
+    language: "en"          # reserved for future language filtering
+    quality_filter: "high"  # low | medium | high
+
+  # ---------------------------------------------------------------------------
+  # Tokenization
+  # ---------------------------------------------------------------------------
+  tokenization:
+    tokenizer: "gpt2"
+    max_seq_length: 2048
+    stride: 2048            # set < max_seq_length for overlapping windows
+    cache_dir: ".cache/tokenized_data"
+    num_workers: 8
+
+  # ---------------------------------------------------------------------------
+  # Streaming & Loading
+  # ---------------------------------------------------------------------------
+  loading:
+    streaming: true
+    batch_size: 32
+    shuffle: true
+    shuffle_buffer_size: 10000
+    drop_remainder: false
+    prefetch: true
+    prefetch_size: 2        # tf.data.AUTOTUNE when set to -1
+
+  # ---------------------------------------------------------------------------
+  # Statistics
+  # ---------------------------------------------------------------------------
+  collect_stats: true
+  stats_output: "data/statistics.json"

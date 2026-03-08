@@ -2,13 +2,16 @@
 Data preprocessing utilities.
 
 This module provides utilities for cleaning, tokenizing, and preparing
-text data for training language models.
+text data for training language models.  It extends basic whitespace
+normalisation with HTML/URL removal, quality filtering, and deduplication
+suitable for large-scale pre-training pipelines.
 """
 
+import hashlib
 import logging
 import re
 import os
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Set, Tuple
 
 import numpy as np
 
@@ -63,12 +66,37 @@ class DataPreprocessor:
     def clean_text(self, text: str) -> str:
         """Clean and normalize a single text string.
 
+        Applies the following transformations in order:
+
+        1. Remove HTML/XML tags.
+        2. Remove URLs and e-mail addresses.
+        3. Strip null bytes and ASCII control characters.
+        4. Normalize whitespace (collapse runs of spaces/tabs/newlines).
+        5. Optionally convert to lower-case.
+        6. Optionally remove non-alphanumeric characters.
+
         Args:
             text: Input text to clean.
 
         Returns:
             Cleaned text string.
         """
+        # Remove HTML/XML tags
+        text = re.sub(r"<[^>]+>", " ", text)
+
+        # Remove URLs
+        text = re.sub(
+            r"https?://\S+|www\.\S+",
+            " ",
+            text,
+        )
+
+        # Remove e-mail addresses
+        text = re.sub(r"\S+@\S+\.\S+", " ", text)
+
+        # Remove null bytes and control characters (keep \t and \n for now)
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
         # Normalize whitespace
         text = re.sub(r"\s+", " ", text).strip()
 
@@ -77,9 +105,6 @@ class DataPreprocessor:
 
         if self.remove_special_chars:
             text = re.sub(r"[^a-zA-Z0-9\s.,!?;:'\"-]", "", text)
-
-        # Remove null bytes and control characters
-        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
 
         return text
 
@@ -221,6 +246,66 @@ class DataPreprocessor:
         cleaned = self.clean_texts(texts)
         logger.info("Prepared %d texts from HuggingFace dataset", len(cleaned))
         return cleaned
+
+    def filter_by_length(
+        self,
+        texts: List[str],
+        min_length: int = 50,
+        max_length: int = 100_000,
+    ) -> List[str]:
+        """Filter texts by character length.
+
+        Args:
+            texts: List of text strings.
+            min_length: Minimum character length (inclusive).
+            max_length: Maximum character length (inclusive).
+
+        Returns:
+            Filtered list of texts.
+        """
+        result = [t for t in texts if min_length <= len(t) <= max_length]
+        logger.info(
+            "filter_by_length: kept %d / %d texts (min=%d, max=%d)",
+            len(result),
+            len(texts),
+            min_length,
+            max_length,
+        )
+        return result
+
+    def deduplicate(
+        self,
+        texts: List[str],
+        exact: bool = True,
+    ) -> List[str]:
+        """Remove duplicate texts.
+
+        When *exact* is ``True`` exact string duplicates are removed.
+        Each text is represented by its SHA-256 digest so that the full
+        strings are never stored twice in memory.
+
+        Args:
+            texts: List of text strings.
+            exact: Whether to use exact (hash-based) deduplication.
+                Fuzzy deduplication is not yet implemented.
+
+        Returns:
+            Deduplicated list preserving the original order.
+        """
+        if not exact:
+            logger.warning("Fuzzy deduplication is not yet implemented; falling back to exact.")
+
+        seen: Set[str] = set()
+        result: List[str] = []
+        for text in texts:
+            digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+            if digest not in seen:
+                seen.add(digest)
+                result.append(text)
+
+        removed = len(texts) - len(result)
+        logger.info("deduplicate: removed %d duplicates, kept %d texts.", removed, len(result))
+        return result
 
 
 def tokenize_dataset(

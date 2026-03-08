@@ -349,11 +349,25 @@ class Trainer:
             epoch_start = time.time()
             epoch_loss = 0.0
             num_steps = 0
+            epoch_tokens = 0
 
             accum_batches = []
 
             for batch in self.train_dataset:
                 accum_batches.append(batch)
+
+                # Count tokens for throughput tracking
+                if isinstance(batch, (tuple, list)):
+                    batch_ids = batch[0]
+                    batch_mask = batch[1] if len(batch) > 1 else None
+                else:
+                    batch_ids = batch.get("input_ids")
+                    batch_mask = batch.get("attention_mask")
+
+                if batch_mask is not None:
+                    epoch_tokens += int(tf.reduce_sum(batch_mask).numpy())
+                else:
+                    epoch_tokens += int(tf.size(batch_ids).numpy())
 
                 if len(accum_batches) < self.gradient_accumulation_steps:
                     continue
@@ -371,11 +385,14 @@ class Trainer:
                 # Logging
                 if self.global_step % self.logging_steps == 0:
                     avg_loss = epoch_loss / num_steps
+                    elapsed = time.time() - epoch_start
+                    tokens_per_sec = epoch_tokens / max(elapsed, 1e-9)
                     logger.info(
-                        "Step %d | Loss: %.4f | LR: %.2e",
+                        "Step %d | Loss: %.4f | LR: %.2e | Tokens/s: %.0f",
                         self.global_step,
                         avg_loss,
                         float(self.optimizer.learning_rate),
+                        tokens_per_sec,
                     )
 
                 # Mid-epoch evaluation
@@ -410,9 +427,10 @@ class Trainer:
 
             avg_epoch_loss = epoch_loss / max(num_steps, 1)
             elapsed = time.time() - epoch_start
+            tokens_per_sec = epoch_tokens / max(elapsed, 1e-9)
             logger.info(
-                "Epoch %d done in %.1fs | Avg Loss: %.4f",
-                epoch, elapsed, avg_epoch_loss,
+                "Epoch %d done in %.1fs | Avg Loss: %.4f | Tokens/s: %.0f",
+                epoch, elapsed, avg_epoch_loss, tokens_per_sec,
             )
             history["train_loss"].append(avg_epoch_loss)
 

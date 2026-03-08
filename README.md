@@ -14,6 +14,7 @@ A comprehensive small language model implementation in TensorFlow, supporting te
   - [Evaluation](#evaluation)
 - [Model Architecture](#model-architecture)
 - [Configuration](#configuration)
+- [Data Pipeline](#data-pipeline)
 - [Examples](#examples)
 - [Testing](#testing)
 
@@ -27,6 +28,7 @@ A comprehensive small language model implementation in TensorFlow, supporting te
 - **Efficient Training**: Gradient accumulation, early stopping, LR scheduling, mixed precision
 - **Flexible Inference**: Top-K/Top-P sampling, beam search, greedy decoding, batch inference
 - **GPU/TPU Support**: Automatic device detection and utilization
+- **Large-Scale Data Pipeline**: Streaming datasets, multi-source loading, HuggingFace Hub integration, tokenization caching, and quality filtering
 
 ---
 
@@ -40,7 +42,8 @@ small-language-model/
 ├── config/
 │   ├── model_config.yaml        # Model architecture settings
 │   ├── training_config.yaml     # Training hyperparameters
-│   └── inference_config.yaml    # Inference settings
+│   ├── inference_config.yaml    # Inference settings
+│   └── data_config.yaml         # Data pipeline configuration
 ├── src/
 │   ├── __init__.py
 │   ├── model/
@@ -49,11 +52,15 @@ small-language-model/
 │   │   └── pretrained_wrapper.py # HuggingFace model wrapper
 │   ├── data/
 │   │   ├── __init__.py
-│   │   ├── dataset.py            # Dataset classes
-│   │   └── preprocessing.py     # Text preprocessing utilities
+│   │   ├── dataset.py            # Dataset classes (incl. MultiFileTextDataset)
+│   │   ├── preprocessing.py      # Text preprocessing & quality filtering
+│   │   ├── streaming_dataset.py  # Streaming multi-file/dir data loader
+│   │   ├── huggingface_loader.py # HuggingFace Hub integration
+│   │   ├── tokenizer_cache.py    # Tokenization caching to disk
+│   │   └── statistics.py         # Data analysis and monitoring
 │   ├── training/
 │   │   ├── __init__.py
-│   │   ├── trainer.py            # Training loop
+│   │   ├── trainer.py            # Training loop (with throughput tracking)
 │   │   └── metrics.py            # Metrics tracking
 │   └── inference/
 │       ├── __init__.py
@@ -64,7 +71,10 @@ small-language-model/
 │   ├── finetune_pretrained.py    # Fine-tune pre-trained models
 │   ├── evaluate.py               # Model evaluation
 │   ├── inference.py              # Run inference
-│   └── download_model.py         # Download HuggingFace models
+│   ├── download_model.py         # Download HuggingFace models
+│   ├── prepare_data.py           # Download & prepare datasets
+│   ├── download_datasets.py      # Download popular LM datasets
+│   └── analyze_data.py           # Generate data statistics
 ├── examples/
 │   ├── text_generation_example.py
 │   ├── qa_example.py
@@ -347,4 +357,165 @@ Run with coverage:
 
 ```bash
 pytest tests/ -v --cov=src --cov-report=html
+```
+
+---
+
+## Data Pipeline
+
+The repository ships a high-throughput data loading stack suitable for training on 1–100 billion token datasets.
+
+### Supported Data Sources
+
+| Source | Formats | Class |
+|--------|---------|-------|
+| Single file | `.txt`, `.jsonl`, `.parquet`, `.arrow` | `TextDataset` |
+| Multiple files / directories | all of the above | `StreamingTextDataset`, `MultiFileTextDataset` |
+| HuggingFace Hub | streaming or cached | `HuggingFaceLoader` |
+
+### Streaming from Local Files
+
+```python
+from src.data.streaming_dataset import StreamingTextDataset
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer.pad_token = tokenizer.eos_token
+
+# Stream from a whole directory (recursively)
+dataset = StreamingTextDataset(
+    paths="data/books/",
+    tokenizer=tokenizer,
+    max_seq_length=2048,
+    recursive=True,
+    shuffle=True,
+)
+tf_ds = dataset.get_tf_dataset(batch_size=32)
+```
+
+### Multiple Files via MultiFileTextDataset
+
+```python
+from src.data.dataset import MultiFileTextDataset
+
+# Combine a directory and an explicit JSONL file
+dataset = MultiFileTextDataset(
+    paths=["data/books/", "data/web.jsonl"],
+    tokenizer=tokenizer,
+    max_seq_length=1024,
+    recursive=True,
+)
+tf_ds = dataset.get_tf_dataset(batch_size=16, shuffle=True)
+```
+
+### HuggingFace Hub Integration
+
+```python
+from src.data.huggingface_loader import HuggingFaceLoader
+
+# Stream OpenWebText without downloading the full dataset
+loader = HuggingFaceLoader(
+    dataset_name="openwebtext",  # short key from RECOMMENDED_DATASETS
+    tokenizer=tokenizer,
+    max_seq_length=1024,
+    streaming=True,             # never loads full dataset into RAM
+    max_samples=1_000_000,
+)
+tf_ds = loader.get_tf_dataset(batch_size=32)
+
+# List available pre-training datasets
+HuggingFaceLoader.list_recommended()
+```
+
+### Tokenization Caching
+
+```python
+from src.data.tokenizer_cache import TokenizerCache
+from src.data.streaming_dataset import StreamingTextDataset
+
+cache = TokenizerCache(
+    cache_dir=".cache/tokenized",
+    tokenizer=tokenizer,
+    max_seq_length=2048,
+)
+
+if not cache.is_cached():
+    src = StreamingTextDataset("data/", tokenizer, max_seq_length=2048, shuffle=False)
+    cache.tokenize_texts(src.stream_texts())
+
+tf_ds = cache.get_tf_dataset(batch_size=32, shuffle=True)
+print(cache.get_stats())  # {"total_chunks": ..., "total_tokens": ..., ...}
+```
+
+### Quality Filtering & Deduplication
+
+```python
+from src.data.preprocessing import DataPreprocessor
+
+preprocessor = DataPreprocessor()
+
+texts = [...]
+texts = preprocessor.clean_texts(texts)            # HTML, URL, e-mail removal
+texts = preprocessor.filter_by_length(texts, 50, 100_000)
+texts = preprocessor.deduplicate(texts)
+```
+
+### Data Statistics
+
+```python
+from src.data.statistics import DataStatistics
+
+stats = DataStatistics(tokenizer, output_path="data/statistics.json")
+stats.analyze_texts(iter(texts))
+stats.save()
+print(stats.get_stats()["tokens_per_text"])
+```
+
+### Data Preparation Scripts
+
+```bash
+# Prepare and split a local directory into train/val/test
+python scripts/prepare_data.py local \
+    --path data/raw/ --output data/prepared/ --deduplicate
+
+# Download OpenWebText (first 100 000 documents)
+python scripts/prepare_data.py huggingface \
+    --dataset openwebtext \
+    --max-samples 100000 \
+    --output data/openwebtext_100k.jsonl
+
+# List and download recommended large-scale datasets
+python scripts/download_datasets.py --list
+python scripts/download_datasets.py openwebtext slimpajama \
+    --max-samples 50000 --output data/
+
+# Compute and save data statistics
+python scripts/analyze_data.py \
+    --path data/train.txt \
+    --output data/statistics.json
+```
+
+### Data Configuration (`config/data_config.yaml`)
+
+```yaml
+data:
+  sources:
+    - type: "local"
+      path: "data/train.txt"
+    - type: "local"
+      path: "data/books/"
+      recursive: true
+  preprocessing:
+    clean_text: true
+    remove_duplicates: true
+    min_length: 50
+    max_length: 100000
+  tokenization:
+    tokenizer: "gpt2"
+    max_seq_length: 2048
+    cache_dir: ".cache/tokenized_data"
+  loading:
+    streaming: true
+    batch_size: 32
+    shuffle: true
 ```
