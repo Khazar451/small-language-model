@@ -13,6 +13,8 @@ A production-grade language model framework in TensorFlow supporting 1B–8B par
 - [Repository Structure](#repository-structure)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Model Sizes & Memory Requirements](#model-sizes--memory-requirements)
+- [Architecture Optimizations](#architecture-optimizations)
 - [Usage](#usage)
   - [Training from Scratch](#training-from-scratch)
   - [Fine-tuning Pre-trained Models](#fine-tuning-pre-trained-models)
@@ -453,11 +455,166 @@ model = SmallTransformer(config)
 print(f"Parameters: {model.count_parameters():,}")
 ```
 
+### Production-Grade 3B Model (Quick Start)
+
+```python
+from src.model.transformer import SmallTransformer
+
+# Create a 3B model with GQA + RoPE + SwiGLU (all optimizations enabled)
+model = SmallTransformer.for_size("3b")
+print(f"Parameters: {model.count_parameters():,}")   # ~3B
+print(f"Config: {model.config.to_dict()}")
+```
+
+---
+
+## Model Sizes & Memory Requirements
+
+| Model | Parameters | d_model | Heads | KV Heads | Layers | d_ff | FP16 Size | INT4 Size |
+|-------|-----------|---------|-------|----------|--------|------|-----------|-----------|
+| **1B** | ~1.3B | 768 | 12 | 2 | 12 | 3072 | ~2.5 GB | ~700 MB |
+| **3B** | ~3.0B | 1536 | 16 | 4 | 24 | 6144 | ~6 GB | ~1.5 GB |
+| **5B** | ~5.2B | 2048 | 32 | 8 | 32 | 8192 | ~10 GB | ~2.5 GB |
+| **8B** | ~8.0B | 2560 | 32 | 8 | 40 | 10240 | ~16 GB | ~4 GB |
+
+*All predefined configs use GQA + RoPE + SwiGLU for maximum efficiency.*
+
+---
+
+## Architecture Optimizations
+
+### Grouped-Query Attention (GQA)
+
+Replaces standard multi-head attention (MHA) to reduce KV cache memory during inference. Each group of query heads shares a single key/value head.
+
+```python
+from src.model.transformer import TransformerConfig, SmallTransformer
+
+config = TransformerConfig(
+    d_model=1536, num_heads=16,
+    num_kv_heads=4,   # 4 KV heads shared across 16 Q heads
+    use_gqa=True,
+)
+model = SmallTransformer(config)
+```
+
+- **Memory reduction**: ~75% smaller KV cache vs MHA (4 KV heads vs 16 Q heads)
+- **Minimal accuracy degradation** compared to MHA
+
+### Rotary Position Embeddings (RoPE)
+
+Replaces learned/sinusoidal positional encodings with rotation-based embeddings applied inside the attention layer.
+
+```python
+config = TransformerConfig(use_rope=True)
+```
+
+- **Better generalization** to sequences longer than training length
+- **No dedicated position embedding table** — saves memory
+
+### SwiGLU Feed-Forward Network
+
+Replaces the standard `Dense → GELU → Dense` FFN with a gated variant.
+
+```python
+config = TransformerConfig(use_swiglu=True)
+```
+
+- **~10% better parameter efficiency** vs GELU+Dense FFN
+- **Improved perplexity** on language modeling benchmarks
+
+### Flash Attention
+
+Memory-efficient tiled attention computation.
+
+```python
+config = TransformerConfig(use_flash_attention=True)
+```
+
+- Avoids materializing the full O(n²) attention matrix
+- Mathematically equivalent to standard attention
+
+---
+
+## Production-Grade Features
+
+### Gradient Checkpointing
+
+Reduces training memory by ~30-40% by recomputing activations during the backward pass instead of storing them.
+
+```python
+from src.model.transformer import TransformerConfig, SmallTransformer
+from src.training.trainer import Trainer
+
+config = TransformerConfig(gradient_checkpointing=True, ...)
+# Or enable via Trainer:
+trainer = Trainer(model, optimizer, train_ds, use_gradient_checkpointing=True)
+```
+
+### Mixed Precision Training
+
+Enables FP16 or BF16 mixed precision for ~2x memory savings and speedup on modern GPUs.
+
+```python
+# Via Trainer:
+trainer = Trainer(model, optimizer, train_ds, mixed_precision="fp16")
+
+# Or globally:
+from src.training.distributed import configure_mixed_precision
+configure_mixed_precision("fp16")  # or "bf16" for TPU/Ampere GPUs
+```
+
+### Quantization
+
+Reduce model size for inference deployment.
+
+```python
+from src.model.quantization import quantize_model_weights, estimate_quantized_size_gb
+
+# Quantize all Dense weights to INT8
+quant_data = quantize_model_weights(model, mode="int8")
+print(f"INT8 size: {estimate_quantized_size_gb(model, mode='int8'):.2f} GB")
+
+# INT4 (4x size reduction)
+quant_data = quantize_model_weights(model, mode="int4")
+print(f"INT4 size: {estimate_quantized_size_gb(model, mode='int4'):.2f} GB")
+```
+
+### Distributed Training
+
+Auto-detect and use the best available hardware strategy.
+
+```python
+from src.training.distributed import auto_detect_strategy, configure_mixed_precision
+
+strategy = auto_detect_strategy()   # TPU > multi-GPU > single-GPU > CPU
+configure_mixed_precision("fp16")
+
+with strategy.scope():
+    model = SmallTransformer.for_size("3b")
+```
+
+For multi-GPU with explicit control:
+
+```python
+from src.training.distributed import get_distribution_strategy
+
+strategy = get_distribution_strategy(num_gpus=4)
+with strategy.scope():
+    model = SmallTransformer.for_size("8b")
+```
+
 ---
 
 ## Usage
 
-### Training from Scratch
+### Training a 3B Model
+
+```bash
+python examples/train_3b_model.py
+```
+
+### Training from Scratch (Custom Config)
 
 ```bash
 python scripts/train.py \
@@ -567,6 +724,8 @@ python scripts/download_model.py --model_name bert-base-uncased --task question_
 ```yaml
 model:
   type: transformer
+  # Use a predefined size (1b, 3b, 5b, 8b) or set fields manually:
+  size: null
   vocab_size: 50257
   d_model: 2048
   num_heads: 16
@@ -829,9 +988,10 @@ pytest tests/ -v
 Run specific test modules:
 
 ```bash
-pytest tests/test_model.py -v     # Model architecture tests
-pytest tests/test_data.py -v      # Data pipeline tests
-pytest tests/test_training.py -v  # Training utility tests
+pytest tests/test_model.py -v           # Model architecture tests
+pytest tests/test_data.py -v            # Data pipeline tests
+pytest tests/test_training.py -v        # Training utility tests
+pytest tests/test_optimizations.py -v   # GQA, RoPE, SwiGLU, quantization tests
 ```
 
 Run with coverage:

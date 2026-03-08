@@ -76,6 +76,8 @@ class Trainer:
         mixed_precision: bool = False,
         resume_from_checkpoint: bool = False,
         callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
+        mixed_precision: Optional[str] = None,
+        use_gradient_checkpointing: bool = False,
     ):
         self.model = model
         self.train_dataset = train_dataset
@@ -94,6 +96,19 @@ class Trainer:
         self.gradient_checkpointing = gradient_checkpointing
         self.mixed_precision = mixed_precision
         self.resume_from_checkpoint = resume_from_checkpoint
+
+        # Configure mixed precision if requested
+        if mixed_precision is not None:
+            from src.training.distributed import configure_mixed_precision
+            configure_mixed_precision(mixed_precision)
+            logger.info("Trainer: mixed precision enabled (%s)", mixed_precision)
+        self.mixed_precision = mixed_precision
+
+        # Enable gradient checkpointing on the model if requested and supported
+        if use_gradient_checkpointing and hasattr(model, "config"):
+            model.config.gradient_checkpointing = True
+            logger.info("Trainer: gradient checkpointing enabled")
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Build optimizer
         if isinstance(optimizer, str):

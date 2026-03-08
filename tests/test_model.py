@@ -352,3 +352,203 @@ class TestSmallTransformer:
         outputs = model(input_ids, training=False)
         assert not np.any(np.isnan(outputs["logits"].numpy()))
         assert not np.any(np.isinf(outputs["logits"].numpy()))
+
+
+# ---------------------------------------------------------------------------
+# Predefined configuration constants tests
+# ---------------------------------------------------------------------------
+
+class TestPredefinedConfigs:
+    """Tests for SMALL_CONFIG, MEDIUM_CONFIG, LARGE_CONFIG, XL_CONFIG,
+    CONFIG_3B, and CONFIG_5B predefined constants."""
+
+    def test_small_config_values(self):
+        from src.model.transformer import SMALL_CONFIG
+        assert SMALL_CONFIG.d_model == 256
+        assert SMALL_CONFIG.num_layers == 4
+        assert SMALL_CONFIG.num_heads == 8
+
+    def test_medium_config_values(self):
+        from src.model.transformer import MEDIUM_CONFIG
+        assert MEDIUM_CONFIG.d_model == 512
+        assert MEDIUM_CONFIG.num_layers == 6
+        assert MEDIUM_CONFIG.num_heads == 8
+
+    def test_large_config_values(self):
+        from src.model.transformer import LARGE_CONFIG
+        assert LARGE_CONFIG.d_model == 768
+        assert LARGE_CONFIG.num_layers == 12
+        assert LARGE_CONFIG.num_heads == 12
+
+    def test_xl_config_values(self):
+        from src.model.transformer import XL_CONFIG
+        assert XL_CONFIG.d_model == 1024
+        assert XL_CONFIG.num_layers == 24
+        assert XL_CONFIG.num_heads == 16
+
+    def test_3b_config_values(self):
+        from src.model.transformer import CONFIG_3B
+        assert CONFIG_3B.d_model == 2048
+        assert CONFIG_3B.num_layers == 24
+        assert CONFIG_3B.num_heads == 32
+        assert CONFIG_3B.d_ff == 8192
+        assert CONFIG_3B.gradient_checkpointing is True
+        assert CONFIG_3B.use_mixed_precision is True
+
+    def test_5b_config_values(self):
+        from src.model.transformer import CONFIG_5B
+        assert CONFIG_5B.d_model == 2560
+        assert CONFIG_5B.num_layers == 32
+        assert CONFIG_5B.num_heads == 32
+        assert CONFIG_5B.d_ff == 10240
+        assert CONFIG_5B.gradient_checkpointing is True
+        assert CONFIG_5B.use_mixed_precision is True
+
+    def test_3b_config_roundtrip(self):
+        from src.model.transformer import CONFIG_3B, TransformerConfig
+        d = CONFIG_3B.to_dict()
+        restored = TransformerConfig.from_dict(d)
+        assert restored.d_model == CONFIG_3B.d_model
+        assert restored.gradient_checkpointing == CONFIG_3B.gradient_checkpointing
+        assert restored.use_mixed_precision == CONFIG_3B.use_mixed_precision
+        assert restored.use_quantization == CONFIG_3B.use_quantization
+
+    def test_5b_config_roundtrip(self):
+        from src.model.transformer import CONFIG_5B, TransformerConfig
+        d = CONFIG_5B.to_dict()
+        restored = TransformerConfig.from_dict(d)
+        assert restored.d_model == CONFIG_5B.d_model
+        assert restored.num_layers == CONFIG_5B.num_layers
+
+    def test_optimization_fields_in_to_dict(self):
+        from src.model.transformer import TransformerConfig
+        cfg = TransformerConfig(
+            gradient_checkpointing=True,
+            use_mixed_precision=True,
+            use_quantization=True,
+        )
+        d = cfg.to_dict()
+        assert d["gradient_checkpointing"] is True
+        assert d["use_mixed_precision"] is True
+        assert d["use_quantization"] is True
+
+    def test_optimization_fields_default_false(self):
+        from src.model.transformer import TransformerConfig
+        cfg = TransformerConfig()
+        assert cfg.gradient_checkpointing is False
+        assert cfg.use_mixed_precision is False
+        assert cfg.use_quantization is False
+
+    def test_from_dict_preserves_optimization_fields(self):
+        from src.model.transformer import TransformerConfig
+        d = {"d_model": 64, "num_heads": 4, "gradient_checkpointing": True,
+             "use_mixed_precision": True, "use_quantization": False}
+        cfg = TransformerConfig.from_dict(d)
+        assert cfg.gradient_checkpointing is True
+        assert cfg.use_mixed_precision is True
+        assert cfg.use_quantization is False
+
+
+# ---------------------------------------------------------------------------
+# Optimization utilities tests
+# ---------------------------------------------------------------------------
+
+class TestOptimizations:
+    """Tests for src.model.optimizations helpers."""
+
+    def test_suggest_batch_size_basic(self):
+        from src.model.optimizations import suggest_batch_size
+        bs = suggest_batch_size(
+            model_param_count=3e9,
+            seq_len=2048,
+            available_memory_gb=80.0,
+            mixed_precision=True,
+        )
+        assert isinstance(bs, int)
+        assert bs >= 1
+
+    def test_suggest_batch_size_fp32(self):
+        from src.model.optimizations import suggest_batch_size
+        bs_fp32 = suggest_batch_size(
+            model_param_count=117e6,
+            seq_len=512,
+            available_memory_gb=16.0,
+            mixed_precision=False,
+        )
+        bs_fp16 = suggest_batch_size(
+            model_param_count=117e6,
+            seq_len=512,
+            available_memory_gb=16.0,
+            mixed_precision=True,
+        )
+        # fp16 should allow at least as large a batch as fp32
+        assert bs_fp16 >= bs_fp32
+
+    def test_suggest_batch_size_inference(self):
+        from src.model.optimizations import suggest_batch_size
+        bs = suggest_batch_size(
+            model_param_count=117e6,
+            seq_len=512,
+            available_memory_gb=8.0,
+            for_inference=True,
+        )
+        assert bs >= 1
+
+    def test_suggest_batch_size_model_exceeds_memory(self):
+        from src.model.optimizations import suggest_batch_size
+        # Model bigger than available memory should return 1
+        bs = suggest_batch_size(
+            model_param_count=5e9,
+            seq_len=2048,
+            available_memory_gb=4.0,  # Way too small
+            mixed_precision=False,
+        )
+        assert bs == 1
+
+    def test_create_distribution_strategy_default(self):
+        from src.model.optimizations import create_distribution_strategy
+        strategy = create_distribution_strategy("default")
+        assert isinstance(strategy, tf.distribute.Strategy)
+
+    def test_create_distribution_strategy_mirrored(self):
+        from src.model.optimizations import create_distribution_strategy
+        strategy = create_distribution_strategy("mirrored")
+        assert isinstance(strategy, tf.distribute.MirroredStrategy)
+
+    def test_create_distribution_strategy_invalid(self):
+        from src.model.optimizations import create_distribution_strategy
+        with pytest.raises(ValueError, match="Unknown strategy_type"):
+            create_distribution_strategy("banana")
+
+    def test_enable_disable_mixed_precision(self):
+        from src.model.optimizations import enable_mixed_precision, disable_mixed_precision
+        enable_mixed_precision("float16")
+        policy = tf.keras.mixed_precision.global_policy()
+        assert "float16" in policy.name
+        # Reset so we don't break subsequent tests
+        disable_mixed_precision()
+        policy = tf.keras.mixed_precision.global_policy()
+        assert policy.name == "float32"
+
+    def test_enable_mixed_precision_invalid_dtype(self):
+        from src.model.optimizations import enable_mixed_precision
+        with pytest.raises(ValueError):
+            enable_mixed_precision("int8")
+
+    def test_apply_gradient_checkpointing_no_crash(self):
+        from src.model.optimizations import apply_gradient_checkpointing
+        config = TransformerConfig(
+            vocab_size=100, d_model=64, num_heads=4, num_layers=2,
+            d_ff=128, max_seq_length=32, dropout_rate=0.0,
+        )
+        model = SmallTransformer(config)
+        # Should not raise
+        apply_gradient_checkpointing(model)
+        assert True
+
+    def test_apply_gradient_checkpointing_model_without_blocks(self):
+        """apply_gradient_checkpointing should warn but not crash on wrong model."""
+        from src.model.optimizations import apply_gradient_checkpointing
+        dummy = tf.keras.Sequential([tf.keras.layers.Dense(4)])
+        # Should log a warning but not raise
+        apply_gradient_checkpointing(dummy)
