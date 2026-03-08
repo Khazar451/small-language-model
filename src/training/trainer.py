@@ -64,6 +64,7 @@ class Trainer:
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
         output_dir: str = "outputs/checkpoints",
+        checkpoint_dir: Optional[str] = None,
         save_steps: int = 500,
         save_total_limit: int = 3,
         logging_steps: int = 100,
@@ -71,6 +72,9 @@ class Trainer:
         early_stopping_patience: int = 0,
         metric_for_best_model: str = "val_loss",
         greater_is_better: bool = False,
+        gradient_checkpointing: bool = False,
+        mixed_precision: bool = False,
+        resume_from_checkpoint: bool = False,
         callbacks: Optional[List[tf.keras.callbacks.Callback]] = None,
     ):
         self.model = model
@@ -79,7 +83,7 @@ class Trainer:
         self.num_epochs = num_epochs
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
-        self.output_dir = output_dir
+        self.output_dir = checkpoint_dir or output_dir
         self.save_steps = save_steps
         self.save_total_limit = save_total_limit
         self.logging_steps = logging_steps
@@ -87,6 +91,9 @@ class Trainer:
         self.early_stopping_patience = early_stopping_patience
         self.metric_for_best_model = metric_for_best_model
         self.greater_is_better = greater_is_better
+        self.gradient_checkpointing = gradient_checkpointing
+        self.mixed_precision = mixed_precision
+        self.resume_from_checkpoint = resume_from_checkpoint
 
         # Build optimizer
         if isinstance(optimizer, str):
