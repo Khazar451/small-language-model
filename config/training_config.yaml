@@ -48,6 +48,15 @@ training:
   fp16: false                      # Enable float16 training
   bf16: false                      # Enable bfloat16 training
 
+  # Gradient checkpointing — trade compute for memory (required for 3B/5B models)
+  gradient_checkpointing: false
+
+  # Automatic batch size selection
+  # When auto_batch_size is true, the trainer calls suggest_batch_size() from
+  # src.model.optimizations to pick a batch_size that fits in GPU memory and
+  # overrides the batch_size value above.
+  auto_batch_size: false
+
   # Seed for reproducibility
   seed: 42
 
@@ -55,6 +64,14 @@ training:
   use_gpu: true
   num_gpus: 1
 
+  # Distributed training strategy
+  # Options: "default" (single GPU), "mirrored" (multi-GPU single node),
+  #          "multi_worker_mirrored" (multi-node), "tpu"
+  # For 3B models use "mirrored" with num_gpus >= 2.
+  # For 5B models use "mirrored" with num_gpus >= 4 or "multi_worker_mirrored".
+  distribution_strategy: "default"
+
   # Fine-tuning specific
   freeze_base_model: false         # Freeze pre-trained weights
   num_frozen_layers: 0             # Number of layers to freeze from bottom
+

@@ -46,6 +46,7 @@ small-language-model/
 │   ├── model/
 │   │   ├── __init__.py
 │   │   ├── transformer.py        # Custom transformer implementation
+│   │   ├── optimizations.py      # Memory & training optimization utilities
 │   │   └── pretrained_wrapper.py # HuggingFace model wrapper
 │   ├── data/
 │   │   ├── __init__.py
@@ -69,6 +70,7 @@ small-language-model/
 │   ├── text_generation_example.py
 │   ├── qa_example.py
 │   ├── sentiment_analysis_example.py
+│   ├── large_model_example.py
 │   └── finetuning_example.ipynb
 └── tests/
     ├── __init__.py
@@ -268,12 +270,61 @@ The custom `SmallTransformer` is a GPT-style decoder-only transformer with:
 
 ### Approximate Parameter Counts
 
-| Config | Parameters |
-|--------|-----------|
-| Small (d=256, L=4, H=8) | ~30M |
-| Medium (d=512, L=6, H=8) | ~85M |
-| Large (d=768, L=12, H=12) | ~117M |
-| XL (d=1024, L=24, H=16) | ~345M |
+| Config | d_model | Layers | Heads | Parameters |
+|--------|---------|--------|-------|-----------|
+| Small  | 256     | 4      | 8     | ~30M      |
+| Medium | 512     | 6      | 8     | ~85M      |
+| Large  | 768     | 12     | 12    | ~117M     |
+| XL     | 1024    | 24     | 16    | ~345M     |
+| 3B     | 2048    | 24     | 32    | ~3.0–3.5B |
+| 5B     | 2560    | 32     | 32    | ~4.8–5.2B |
+
+### Memory Requirements
+
+| Config | Training (fp32) | Training (fp16 + grad ckpt) | Inference (fp16) |
+|--------|----------------|----------------------------|-----------------|
+| Large  | ~4 GB           | ~2 GB                      | ~1 GB           |
+| XL     | ~14 GB          | ~7 GB                      | ~2.5 GB         |
+| 3B     | ~192 GB         | ~96 GB                     | ~12 GB          |
+| 5B     | ~320 GB         | ~160 GB                    | ~20 GB          |
+
+> **Training 3B/5B models** requires enabling gradient checkpointing and
+> mixed precision.  Use the predefined `CONFIG_3B` / `CONFIG_5B` constants
+> which have these options enabled by default.
+
+### Distributed Training Recommendations
+
+| Model | Recommended Setup |
+|-------|------------------|
+| Large / XL | Single A100 40 GB |
+| 3B | 2–4× A100 40 GB or 1× A100 80 GB, `MirroredStrategy` |
+| 5B | 4× A100 40 GB or 2× A100 80 GB, `MirroredStrategy` or `MultiWorkerMirroredStrategy` |
+
+```python
+from src.model.transformer import SmallTransformer, CONFIG_3B
+from src.model.optimizations import (
+    enable_mixed_precision,
+    apply_gradient_checkpointing,
+    create_distribution_strategy,
+    suggest_batch_size,
+)
+
+# 1. Enable fp16 before model creation
+enable_mixed_precision()
+
+# 2. Create a multi-GPU strategy
+strategy = create_distribution_strategy("mirrored", num_gpus=4)
+
+with strategy.scope():
+    model = SmallTransformer(CONFIG_3B)
+
+# 3. Enable gradient checkpointing
+apply_gradient_checkpointing(model)
+
+# 4. Auto-select batch size
+batch_size = suggest_batch_size(3e9, seq_len=2048, mixed_precision=True)
+print(f"Recommended batch size per GPU: {batch_size}")
+```
 
 ---
 
@@ -317,6 +368,7 @@ Run the example scripts:
 python examples/text_generation_example.py
 python examples/sentiment_analysis_example.py
 python examples/qa_example.py
+python examples/large_model_example.py   # 3B/5B model demo
 ```
 
 For a comprehensive Jupyter notebook walkthrough:
