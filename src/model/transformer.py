@@ -725,7 +725,10 @@ class SmallTransformer(tf.keras.Model):
                     return out
 
                 x = _block_fn(x)
-                attn_weights = None  # weights not available with checkpointing
+                attn_weights = None  # Attention weights are unavailable during gradient
+                # checkpointing because activations are not stored for backward pass.
+                # If you need attention weights for inspection, set
+                # gradient_checkpointing=False and call with return_attention_weights=True.
             else:
                 x, attn_weights = block(x, mask=combined_mask, training=training)
             if return_attention_weights and attn_weights is not None:

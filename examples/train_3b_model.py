@@ -128,7 +128,7 @@ def main() -> None:
     )
 
     # 6. Train
-    logger.info("Starting training …")
+    logger.info("Starting training ...")
     history = trainer.train()
     logger.info("Training complete. Final loss: %.4f", history["train_loss"][-1])
 

@@ -153,7 +153,7 @@ def benchmark_inference(
 
 def main() -> None:
     # 1. Build optimized model
-    logger.info("Building optimized model …")
+    logger.info("Building optimized model ...")
     model = build_optimized_model()
     param_count = model.count_parameters()
     logger.info("Parameters: %d (%.2fB)", param_count, param_count / 1e9)
