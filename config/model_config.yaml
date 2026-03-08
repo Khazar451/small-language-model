@@ -3,10 +3,19 @@ model:
   # Architecture type: 'transformer' or 'pretrained'
   type: transformer
 
-  # Transformer architecture settings
+  # -------------------------------------------------------------------------
+  # Model size selection (shortcut — overrides individual fields below).
+  # Options: '1b', '3b', '5b', '8b', or null (use custom fields below).
+  # When set, the predefined architecture fields (d_model, num_heads, etc.)
+  # are filled in automatically; you can still override individual fields.
+  # -------------------------------------------------------------------------
+  size: null  # e.g. "3b"
+
+  # Transformer architecture settings (used when size is null or overriding)
   vocab_size: 50257           # Vocabulary size (GPT-2 default)
   d_model: 768                # Embedding dimension
   num_heads: 12               # Number of attention heads
+  num_kv_heads: null          # KV heads for GQA (null = same as num_heads)
   num_layers: 12              # Number of transformer layers
   d_ff: 3072                  # Feed-forward hidden dimension
   max_seq_length: 1024        # Maximum sequence length
@@ -25,8 +34,66 @@ model:
 
   num_labels: 2               # For classification tasks
 
-  # Positional encoding type
+  # Positional encoding type (ignored when use_rope: true)
   positional_encoding: "learned"   # "learned" or "sinusoidal"
 
-  # Activation function
+  # Activation function for FFN (ignored when use_swiglu: true)
   activation: "gelu"          # "gelu" or "relu"
+
+  # -------------------------------------------------------------------------
+  # Production-grade optimizations (opt-in)
+  # -------------------------------------------------------------------------
+  use_gqa: false              # Grouped-Query Attention (requires num_kv_heads)
+  use_rope: false             # Rotary Position Embeddings
+  use_swiglu: false           # SwiGLU feed-forward network
+  use_flash_attention: false  # Memory-efficient tiled attention
+
+  # Training memory optimizations
+  gradient_checkpointing: false   # Reduce training memory ~30-40%
+  mixed_precision: null           # null, "fp16", or "bf16"
+
+  # Quantization for inference (null = no quantization)
+  # Options: null, "int8", "int4"
+  quantization: null
+
+
+# -------------------------------------------------------------------------
+# Predefined production configurations
+# -------------------------------------------------------------------------
+# Uncomment one of the sections below and set size accordingly.
+
+# --- 1B model (~1.3B params, ~2.5 GB FP16, ~700 MB INT4) ---
+# model_1b:
+#   size: "1b"
+#   use_gqa: true
+#   use_rope: true
+#   use_swiglu: true
+#   gradient_checkpointing: true
+#   mixed_precision: "fp16"
+
+# --- 3B model (~3.0B params, ~6 GB FP16, ~1.5 GB INT4) ---
+# model_3b:
+#   size: "3b"
+#   use_gqa: true
+#   use_rope: true
+#   use_swiglu: true
+#   gradient_checkpointing: true
+#   mixed_precision: "fp16"
+
+# --- 5B model (~5.2B params, ~10 GB FP16, ~2.5 GB INT4) ---
+# model_5b:
+#   size: "5b"
+#   use_gqa: true
+#   use_rope: true
+#   use_swiglu: true
+#   gradient_checkpointing: true
+#   mixed_precision: "bf16"
+
+# --- 8B model (~8.0B params, ~16 GB FP16, ~4 GB INT4) ---
+# model_8b:
+#   size: "8b"
+#   use_gqa: true
+#   use_rope: true
+#   use_swiglu: true
+#   gradient_checkpointing: true
+#   mixed_precision: "bf16"
