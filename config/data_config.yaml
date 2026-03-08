@@ -1,0 +1,30 @@
+data:
+  # Sources: each entry has a path (supports glob patterns) and a sampling weight.
+  sources:
+    - path: data/openwebtext
+      weight: 0.4
+      format: jsonl
+    - path: data/wikipedia
+      weight: 0.3
+      format: jsonl
+    - path: data/books
+      weight: 0.3
+      format: txt
+
+  tokenizer: gpt2
+  max_seq_length: 2048
+
+  # Streaming mode avoids downloading the full dataset to disk
+  streaming: true
+  buffer_size: 50000
+
+  preprocessing:
+    remove_html: true
+    normalize_whitespace: true
+    filter_min_length: 50
+    filter_max_length: 100000
+    dedup: true
+
+  tokenizer_cache:
+    enabled: true
+    cache_dir: .token_cache

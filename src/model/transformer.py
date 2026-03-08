@@ -96,8 +96,8 @@ class TransformerConfig:
         vocab_size: Size of the vocabulary.
         d_model: Dimensionality of the model embeddings.
         num_heads: Number of attention heads.
-        num_kv_heads: Number of key/value heads for GQA (``None`` = same as
-            ``num_heads``, i.e. standard MHA).
+        num_kv_heads: Number of key/value heads for Grouped Query Attention (GQA).
+            If None or equal to num_heads, standard multi-head attention is used.
         num_layers: Number of transformer layers.
         d_ff: Dimensionality of the feed-forward network.
         max_seq_length: Maximum sequence length.
@@ -106,20 +106,11 @@ class TransformerConfig:
         task: Task type ('text_generation', 'sequence_classification',
               'question_answering', 'sentiment_analysis').
         num_labels: Number of labels for classification tasks.
-        positional_encoding: Type of positional encoding.  Ignored when
-            ``use_rope=True`` (RoPE is applied inside the attention layer).
-            Set to ``'learned'`` or ``'sinusoidal'``.
-        activation: Activation function for the FFN ('gelu' or 'relu').
-            Ignored when ``use_swiglu=True``.
-        pad_token_id: Token ID used for padding.
-        use_gqa: Enable Grouped-Query Attention (requires ``num_kv_heads``).
-        use_rope: Enable Rotary Position Embeddings inside the attention layer.
-        use_swiglu: Enable SwiGLU feed-forward network.
-        use_flash_attention: Enable memory-efficient tiled attention computation.
-        gradient_checkpointing: Enable gradient checkpointing to reduce
-            training memory (only effective during training).
-        mixed_precision: Mixed precision training mode.
-            ``None`` (default FP32), ``'fp16'``, or ``'bf16'``.
+        positional_encoding: Type of positional encoding ('learned', 'sinusoidal',
+            or 'rope' for Rotary Position Embeddings).
+        rope_theta: Base period for RoPE frequencies (default 10000.0).
+        activation: Activation function ('gelu', 'relu', or 'swiglu').
+        use_flash_attention: Whether to use memory-efficient Flash Attention.
     """
 
     vocab_size: int = 50257
@@ -134,7 +125,9 @@ class TransformerConfig:
     task: str = "text_generation"
     num_labels: int = 2
     positional_encoding: str = "learned"
+    rope_theta: float = 10000.0
     activation: str = "gelu"
+    use_flash_attention: bool = False
     pad_token_id: int = 0
     # Production-grade optimizations (opt-in)
     use_gqa: bool = False
@@ -164,7 +157,9 @@ class TransformerConfig:
             "task": self.task,
             "num_labels": self.num_labels,
             "positional_encoding": self.positional_encoding,
+            "rope_theta": self.rope_theta,
             "activation": self.activation,
+            "use_flash_attention": self.use_flash_attention,
             "pad_token_id": self.pad_token_id,
             "use_gqa": self.use_gqa,
             "use_rope": self.use_rope,
