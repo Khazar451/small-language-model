@@ -30,3 +30,74 @@ model:
 
   # Activation function
   activation: "gelu"          # "gelu" or "relu"
+
+  # Memory optimization flags (see src/model/optimizations.py)
+  gradient_checkpointing: false   # Trade compute for memory during training
+  use_mixed_precision: false      # Enable float16 mixed precision
+  use_quantization: false         # Enable int8 quantization for inference
+
+
+# ---------------------------------------------------------------------------
+# Predefined size configurations
+# Uncomment one of the sections below and copy its values into the 'model'
+# block above (or load directly via TransformerConfig constants in Python).
+# ---------------------------------------------------------------------------
+
+# Small (~30M parameters) — fast experimentation
+# model_small:
+#   d_model: 256
+#   num_heads: 8
+#   num_layers: 4
+#   d_ff: 1024
+#   max_seq_length: 1024
+
+# Medium (~85M parameters)
+# model_medium:
+#   d_model: 512
+#   num_heads: 8
+#   num_layers: 6
+#   d_ff: 2048
+#   max_seq_length: 1024
+
+# Large (~117M parameters) — default above
+# model_large:
+#   d_model: 768
+#   num_heads: 12
+#   num_layers: 12
+#   d_ff: 3072
+#   max_seq_length: 1024
+
+# XL (~345M parameters)
+# model_xl:
+#   d_model: 1024
+#   num_heads: 16
+#   num_layers: 24
+#   d_ff: 4096
+#   max_seq_length: 1024
+
+# 3B (~3.0–3.5B parameters)
+# Minimum recommended hardware: 2× 40 GB A100 GPUs
+# Memory requirements (training):  ~96 GB GPU RAM with gradient checkpointing + fp16
+# Memory requirements (inference): ~12 GB GPU RAM with float16
+# model_3b:
+#   d_model: 2048
+#   num_heads: 32
+#   num_layers: 24
+#   d_ff: 8192
+#   max_seq_length: 2048
+#   gradient_checkpointing: true
+#   use_mixed_precision: true
+
+# 5B (~4.8–5.2B parameters)
+# Minimum recommended hardware: 4× 40 GB A100 GPUs (or 2× 80 GB A100)
+# Memory requirements (training):  ~160 GB GPU RAM with gradient checkpointing + fp16
+# Memory requirements (inference): ~20 GB GPU RAM with float16
+# model_5b:
+#   d_model: 2560
+#   num_heads: 32
+#   num_layers: 32
+#   d_ff: 10240
+#   max_seq_length: 2048
+#   gradient_checkpointing: true
+#   use_mixed_precision: true
+
