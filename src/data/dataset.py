@@ -2,12 +2,14 @@
 Dataset classes for loading and serving training data.
 
 This module provides TensorFlow Dataset wrappers for text generation,
-question answering, and classification tasks.
+question answering, and classification tasks.  It also provides
+:class:`MultiFileTextDataset` for streaming from multiple files or
+directories for large-scale pre-training.
 """
 
 import logging
 import os
-from typing import Optional, List, Dict, Any, Tuple, Iterator
+from typing import Optional, List, Dict, Any, Tuple, Iterator, Union
 
 import numpy as np
 import tensorflow as tf
@@ -388,3 +390,100 @@ class QADataset:
             dataset = dataset.shuffle(buffer_size=len(self.examples))
 
         return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+
+class MultiFileTextDataset:
+    """Dataset for language model pre-training from multiple files or directories.
+
+    A convenience wrapper around :class:`~src.data.streaming_dataset.StreamingTextDataset`
+    that presents the same ``get_tf_dataset`` interface as :class:`TextDataset` while
+    supporting multiple file formats and streaming to avoid loading all data
+    into memory at once.
+
+    Args:
+        paths: File path(s), directory path(s), or glob pattern(s).
+        tokenizer: HuggingFace-compatible tokenizer instance.
+        max_seq_length: Maximum sequence length for each chunk.
+        stride: Sliding-window stride (defaults to *max_seq_length*).
+        recursive: Whether to recurse into subdirectories.
+        shuffle: Whether to shuffle examples during iteration.
+        shuffle_buffer_size: Buffer size for ``tf.data`` element shuffle.
+        text_field: JSON key for text in ``.jsonl`` files.
+        text_column: Column name for text in ``.parquet``/``.arrow`` files.
+        extensions: File extensions to include (defaults to all supported).
+        seed: Random seed for reproducible shuffling.
+
+    Example:
+        >>> from transformers import AutoTokenizer
+        >>> tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        >>> dataset = MultiFileTextDataset(
+        ...     paths=["data/books/", "data/web.jsonl"],
+        ...     tokenizer=tokenizer,
+        ...     max_seq_length=1024,
+        ...     recursive=True,
+        ... )
+        >>> tf_ds = dataset.get_tf_dataset(batch_size=8)
+    """
+
+    def __init__(
+        self,
+        paths: Union[str, List[str]],
+        tokenizer: Any,
+        max_seq_length: int = 1024,
+        stride: Optional[int] = None,
+        recursive: bool = False,
+        shuffle: bool = True,
+        shuffle_buffer_size: int = 10_000,
+        text_field: str = "text",
+        text_column: str = "text",
+        extensions: Optional[List[str]] = None,
+        seed: int = 42,
+    ):
+        from src.data.streaming_dataset import StreamingTextDataset  # noqa: PLC0415
+
+        self._inner = StreamingTextDataset(
+            paths=paths,
+            tokenizer=tokenizer,
+            max_seq_length=max_seq_length,
+            stride=stride,
+            recursive=recursive,
+            shuffle=shuffle,
+            shuffle_buffer_size=shuffle_buffer_size,
+            text_field=text_field,
+            text_column=text_column,
+            extensions=extensions,
+            seed=seed,
+        )
+        self.files = self._inner.files
+        logger.info(
+            "MultiFileTextDataset: %d source file(s)", len(self.files)
+        )
+
+    def get_tf_dataset(
+        self,
+        batch_size: int = 8,
+        shuffle: bool = True,
+        repeat: bool = False,
+        buffer_size: int = 10_000,
+    ) -> tf.data.Dataset:
+        """Create a ``tf.data.Dataset`` from all source files.
+
+        Args:
+            batch_size: Number of examples per batch.
+            shuffle: Whether to shuffle examples.
+            repeat: Whether to repeat the dataset indefinitely.
+            buffer_size: Shuffle buffer size (ignored if *shuffle* is
+                ``False``).
+
+        Returns:
+            ``tf.data.Dataset`` yielding ``(input_ids, attention_mask)``
+            batches.
+        """
+        # Propagate shuffle setting to the inner dataset
+        self._inner.shuffle = shuffle
+        self._inner.shuffle_buffer_size = buffer_size
+        return self._inner.get_tf_dataset(
+            batch_size=batch_size,
+            repeat=repeat,
+            prefetch=True,
+        )

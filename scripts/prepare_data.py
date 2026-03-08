@@ -1,136 +1,161 @@
+#!/usr/bin/env python3
 """
-Prepare and tokenize a raw text dataset for language model training.
+Download and prepare datasets for large-scale language model training.
 
-Usage:
-    python scripts/prepare_data.py \\
-        --input_dir data/raw \\
-        --output_dir data/processed \\
-        --tokenizer gpt2 \\
-        --max_seq_length 2048
+Supports local file preparation and downloading from the HuggingFace Hub.
+
+Usage
+-----
+# Prepare a local text file / directory
+python scripts/prepare_data.py --source local --path data/raw/ --output data/prepared/
+
+# Download an HuggingFace dataset and save a sample as JSONL
+python scripts/prepare_data.py \\
+    --source huggingface \\
+    --dataset openwebtext \\
+    --split train \\
+    --max-samples 100000 \\
+    --output data/openwebtext_100k.jsonl
 """
 
 import argparse
-import glob
+import json
 import logging
 import os
 import sys
 
-import numpy as np
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from transformers import AutoTokenizer
-
-from src.data.preprocessing import clean_text
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Preprocess and tokenize a text dataset")
-    parser.add_argument("--input_dir", required=True, help="Directory containing raw text/jsonl files")
-    parser.add_argument("--output_dir", required=True, help="Directory to write tokenized shards")
-    parser.add_argument("--tokenizer", default="gpt2")
-    parser.add_argument("--max_seq_length", type=int, default=2048)
-    parser.add_argument("--shard_size", type=int, default=100_000,
-                        help="Number of token chunks per output shard")
-    parser.add_argument("--val_fraction", type=float, default=0.01,
-                        help="Fraction of data held out for validation (0 = no split)")
-    parser.add_argument("--extension", default="*.txt",
-                        help="Glob pattern for input files (default: *.txt)")
-    return parser.parse_args()
+def prepare_local(args: argparse.Namespace) -> None:
+    """Clean and split a local text file or directory."""
+    from src.data.preprocessing import DataPreprocessor
+    from src.data.streaming_dataset import collect_files
+
+    files = collect_files(args.path, recursive=args.recursive)
+    if not files:
+        logger.error("No supported files found in: %s", args.path)
+        sys.exit(1)
+
+    preprocessor = DataPreprocessor(
+        lowercase=args.lowercase,
+        remove_special_chars=False,
+    )
+
+    texts = []
+    for fpath in files:
+        logger.info("Reading %s", fpath)
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    texts.append(preprocessor.clean_text(line))
+
+    if args.deduplicate:
+        texts = preprocessor.deduplicate(texts)
+
+    if args.min_length or args.max_length:
+        texts = preprocessor.filter_by_length(
+            texts,
+            min_length=args.min_length or 0,
+            max_length=args.max_length or 10**9,
+        )
+
+    os.makedirs(args.output, exist_ok=True)
+    train, val, test = preprocessor.split_dataset(texts, ratios=(0.8, 0.1, 0.1))
+    preprocessor.save_splits(train, val, test, args.output)
+    logger.info("Wrote splits to %s", args.output)
 
 
-def iter_texts(input_dir: str, extension: str):
-    """Yield (file_path, text) pairs from *input_dir*."""
-    import json
+def prepare_huggingface(args: argparse.Namespace) -> None:
+    """Download an HuggingFace dataset and save it as JSONL."""
+    try:
+        from datasets import load_dataset  # noqa: PLC0415
+    except ImportError:
+        logger.error("datasets package required: pip install datasets")
+        sys.exit(1)
 
-    pattern = os.path.join(input_dir, "**", extension)
-    paths = sorted(glob.glob(pattern, recursive=True))
-    if not paths:
-        # Try jsonl as fallback
-        paths = sorted(glob.glob(os.path.join(input_dir, "**", "*.jsonl"), recursive=True))
-    logger.info("Found %d files matching pattern %s", len(paths), pattern)
-    for path in paths:
-        ext = os.path.splitext(path)[-1].lower()
-        try:
-            with open(path, encoding="utf-8") as fh:
-                if ext == ".jsonl":
-                    for line in fh:
-                        line = line.strip()
-                        if line:
-                            try:
-                                yield path, json.loads(line).get("text", "")
-                            except json.JSONDecodeError:
-                                continue
-                else:
-                    yield path, fh.read()
-        except OSError as exc:
-            logger.warning("Could not read %s: %s", path, exc)
+    from src.data.preprocessing import DataPreprocessor
+
+    preprocessor = DataPreprocessor()
+    logger.info("Loading dataset '%s' split '%s'", args.dataset, args.split)
+
+    subset = args.subset or None
+    ds_kwargs = {"streaming": True}
+    if args.cache_dir:
+        ds_kwargs["cache_dir"] = args.cache_dir
+
+    if subset:
+        dataset = load_dataset(args.dataset, subset, split=args.split, **ds_kwargs)
+    else:
+        dataset = load_dataset(args.dataset, split=args.split, **ds_kwargs)
+
+    text_field = args.text_field or "text"
+    output_path = args.output
+    if os.path.isdir(output_path):
+        output_path = os.path.join(output_path, f"{args.dataset.replace('/', '_')}.jsonl")
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    count = 0
+    with open(output_path, "w", encoding="utf-8") as out_f:
+        for example in dataset:
+            text = example.get(text_field, "")
+            if not text or not text.strip():
+                continue
+            text = preprocessor.clean_text(text)
+            if not text:
+                continue
+            out_f.write(json.dumps({"text": text}) + "\n")
+            count += 1
+            if args.max_samples and count >= args.max_samples:
+                break
+            if count % 10_000 == 0:
+                logger.info("Written %d documents …", count)
+
+    logger.info("Saved %d documents to %s", count, output_path)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Download and prepare datasets for LM training."
+    )
+    sub = parser.add_subparsers(dest="source", required=True)
+
+    # Local sub-command
+    local = sub.add_parser("local", help="Prepare a local file or directory.")
+    local.add_argument("--path", required=True, help="File or directory path.")
+    local.add_argument("--output", required=True, help="Output directory for splits.")
+    local.add_argument("--recursive", action="store_true")
+    local.add_argument("--lowercase", action="store_true")
+    local.add_argument("--deduplicate", action="store_true")
+    local.add_argument("--min-length", type=int, default=50, dest="min_length")
+    local.add_argument("--max-length", type=int, default=0, dest="max_length")
+
+    # HuggingFace sub-command
+    hf = sub.add_parser("huggingface", help="Download a HuggingFace dataset.")
+    hf.add_argument("--dataset", required=True, help="Dataset name (e.g. openwebtext).")
+    hf.add_argument("--split", default="train")
+    hf.add_argument("--subset", default=None)
+    hf.add_argument("--text-field", default="text", dest="text_field")
+    hf.add_argument("--output", required=True, help="Output JSONL file or directory.")
+    hf.add_argument("--max-samples", type=int, default=0, dest="max_samples")
+    hf.add_argument("--cache-dir", default=None, dest="cache_dir")
+
+    return parser
 
 
 def main() -> None:
-    args = parse_args()
-    os.makedirs(os.path.join(args.output_dir, "train"), exist_ok=True)
-    if args.val_fraction > 0:
-        os.makedirs(os.path.join(args.output_dir, "val"), exist_ok=True)
+    parser = build_parser()
+    args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
-    seq_len = args.max_seq_length
-
-    buffer = []
-    shard_idx = 0
-    total_chunks = 0
-    val_buffer = []
-
-    rng = np.random.default_rng(42)
-
-    def flush_shard(data, split):
-        nonlocal shard_idx
-        path = os.path.join(args.output_dir, split, f"shard_{shard_idx:05d}.npz")
-        arr = np.array(data, dtype=np.int32)
-        np.savez_compressed(path, input_ids=arr)
-        logger.info("Wrote %s with %d chunks", path, len(data))
-        shard_idx += 1
-
-    for _, text in iter_texts(args.input_dir, args.extension):
-        text = clean_text(text)
-        if not text.strip():
-            continue
-        ids = tokenizer.encode(text, add_special_tokens=False)
-        buffer.extend(ids)
-        while len(buffer) >= seq_len + 1:
-            chunk = buffer[: seq_len + 1]
-            buffer = buffer[seq_len:]
-            is_val = args.val_fraction > 0 and rng.random() < args.val_fraction
-            target = val_buffer if is_val else []
-            if is_val:
-                val_buffer.append(chunk[:seq_len])
-            else:
-                total_chunks += 1
-
-            # Write train shards
-            if not is_val:
-                # Collect into a list to flush when shard is full
-                if not hasattr(main, "_train_buf"):
-                    main._train_buf = []
-                main._train_buf.append(chunk[:seq_len])
-                if len(main._train_buf) >= args.shard_size:
-                    flush_shard(main._train_buf, "train")
-                    main._train_buf = []
-
-    # Flush remaining data
-    if hasattr(main, "_train_buf") and main._train_buf:
-        flush_shard(main._train_buf, "train")
-    if val_buffer:
-        flush_shard(val_buffer, "val")
-
-    logger.info("Preprocessing complete. Train chunks written to %s", args.output_dir)
+    if args.source == "local":
+        prepare_local(args)
+    else:
+        prepare_huggingface(args)
 
 
 if __name__ == "__main__":

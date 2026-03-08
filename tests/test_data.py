@@ -272,3 +272,274 @@ class TestTokenizeDataset:
         texts = ["Short.", "This is a longer text."]
         result = tokenize_dataset(texts, simple_tokenizer, max_length=16)
         assert "attention_mask" in result
+
+
+# ---------------------------------------------------------------------------
+# StreamingTextDataset tests
+# ---------------------------------------------------------------------------
+
+class TestStreamingTextDataset:
+    def _write_temp_txt(self, lines, suffix=".txt"):
+        import tempfile
+        f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=suffix, delete=False, encoding="utf-8"
+        )
+        f.write("\n".join(lines))
+        f.close()
+        return f.name
+
+    def _write_temp_jsonl(self, texts, field="text"):
+        import json
+        import tempfile
+        f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        )
+        for t in texts:
+            f.write(json.dumps({field: t}) + "\n")
+        f.close()
+        return f.name
+
+    def test_single_txt_file(self, simple_tokenizer):
+        from src.data.streaming_dataset import StreamingTextDataset
+        path = self._write_temp_txt(["Hello world"] * 20)
+        try:
+            ds = StreamingTextDataset(path, simple_tokenizer, max_seq_length=32, shuffle=False)
+            texts = list(ds.stream_texts())
+            assert len(texts) > 0
+        finally:
+            os.unlink(path)
+
+    def test_jsonl_file(self, simple_tokenizer):
+        from src.data.streaming_dataset import StreamingTextDataset
+        path = self._write_temp_jsonl(["Hello world"] * 10)
+        try:
+            ds = StreamingTextDataset(path, simple_tokenizer, max_seq_length=32, shuffle=False)
+            texts = list(ds.stream_texts())
+            assert len(texts) == 10
+        finally:
+            os.unlink(path)
+
+    def test_directory(self, simple_tokenizer):
+        from src.data.streaming_dataset import StreamingTextDataset
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(3):
+                with open(os.path.join(tmpdir, f"file{i}.txt"), "w") as f:
+                    f.write("\n".join([f"text line {j}" for j in range(10)]))
+            ds = StreamingTextDataset(tmpdir, simple_tokenizer, max_seq_length=32, shuffle=False)
+            texts = list(ds.stream_texts())
+            assert len(texts) == 30
+
+    def test_no_files_raises(self, simple_tokenizer):
+        from src.data.streaming_dataset import StreamingTextDataset
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError):
+                StreamingTextDataset(tmpdir, simple_tokenizer)
+
+    def test_tf_dataset_output(self, simple_tokenizer):
+        from src.data.streaming_dataset import StreamingTextDataset
+        path = self._write_temp_txt(["word " * 50] * 30)
+        try:
+            ds = StreamingTextDataset(
+                path, simple_tokenizer, max_seq_length=32, shuffle=False
+            )
+            tf_ds = ds.get_tf_dataset(batch_size=4)
+            for batch in tf_ds.take(1):
+                ids, mask = batch
+                assert ids.dtype == tf.int32
+                assert mask.dtype == tf.int32
+                assert ids.shape[0] <= 4
+        finally:
+            os.unlink(path)
+
+    def test_collect_files(self, simple_tokenizer):
+        from src.data.streaming_dataset import collect_files
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ["a.txt", "b.jsonl", "c.md"]:
+                open(os.path.join(tmpdir, name), "w").close()
+            files = collect_files(tmpdir, extensions=[".txt", ".jsonl"])
+            assert len(files) == 2
+
+
+# ---------------------------------------------------------------------------
+# TokenizerCache tests
+# ---------------------------------------------------------------------------
+
+class TestTokenizerCache:
+    def test_tokenize_and_load(self, simple_tokenizer):
+        from src.data.tokenizer_cache import TokenizerCache
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = TokenizerCache(tmpdir, simple_tokenizer, max_seq_length=32)
+            texts = ["Hello world. " * 10] * 20
+            stats = cache.tokenize_texts(iter(texts), chunk_size=5)
+            assert stats["total_chunks"] > 0
+            assert stats["total_tokens"] > 0
+            assert cache.is_cached()
+
+    def test_skip_if_cached(self, simple_tokenizer):
+        from src.data.tokenizer_cache import TokenizerCache
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = TokenizerCache(tmpdir, simple_tokenizer, max_seq_length=32)
+            texts = ["Hello world. " * 5] * 10
+            cache.tokenize_texts(iter(texts))
+            # Second call should be a no-op
+            stats2 = cache.tokenize_texts(iter(["new text"] * 100))
+            # Should still return old stats
+            assert stats2["total_chunks"] == cache.get_stats()["total_chunks"]
+
+    def test_overwrite(self, simple_tokenizer):
+        from src.data.tokenizer_cache import TokenizerCache
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = TokenizerCache(tmpdir, simple_tokenizer, max_seq_length=32)
+            cache.tokenize_texts(iter(["Hello world. " * 5] * 10))
+            first_count = cache.get_stats()["total_chunks"]
+
+            cache2 = TokenizerCache(tmpdir, simple_tokenizer, max_seq_length=32, overwrite=True)
+            cache2.tokenize_texts(iter(["Hello world. " * 5] * 20))
+            assert cache2.get_stats()["total_chunks"] > first_count
+
+    def test_get_tf_dataset(self, simple_tokenizer):
+        from src.data.tokenizer_cache import TokenizerCache
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = TokenizerCache(tmpdir, simple_tokenizer, max_seq_length=32)
+            texts = ["Hello world. " * 10] * 20
+            cache.tokenize_texts(iter(texts), chunk_size=5)
+            tf_ds = cache.get_tf_dataset(batch_size=4, shuffle=False)
+            for batch in tf_ds.take(1):
+                ids, mask = batch
+                assert ids.dtype == tf.int32
+
+    def test_get_tf_dataset_no_cache_raises(self, simple_tokenizer):
+        from src.data.tokenizer_cache import TokenizerCache
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = TokenizerCache(tmpdir, simple_tokenizer)
+            with pytest.raises(RuntimeError):
+                cache.get_tf_dataset()
+
+
+# ---------------------------------------------------------------------------
+# DataStatistics tests
+# ---------------------------------------------------------------------------
+
+class TestDataStatistics:
+    def test_basic_analysis(self, simple_tokenizer):
+        from src.data.statistics import DataStatistics
+        texts = ["Hello world"] * 10 + ["Machine learning is great"] * 5
+        stats_obj = DataStatistics(simple_tokenizer)
+        result = stats_obj.analyze_texts(iter(texts))
+        assert result["num_texts"] == 15
+        assert result["total_tokens"] > 0
+        assert "tokens_per_text" in result
+        assert "vocabulary" in result
+
+    def test_empty_texts_counted(self, simple_tokenizer):
+        from src.data.statistics import DataStatistics
+        texts = ["Hello", "", "  ", "World"]
+        stats_obj = DataStatistics(simple_tokenizer)
+        result = stats_obj.analyze_texts(iter(texts))
+        assert result["num_texts"] == 2
+        assert result["num_empty"] == 2
+
+    def test_sample_size(self, simple_tokenizer):
+        from src.data.statistics import DataStatistics
+        texts = [f"text number {i}" for i in range(100)]
+        stats_obj = DataStatistics(simple_tokenizer)
+        result = stats_obj.analyze_texts(iter(texts), sample_size=10)
+        assert result["num_texts"] == 10
+
+    def test_save_and_load(self, simple_tokenizer):
+        from src.data.statistics import DataStatistics
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = os.path.join(tmpdir, "stats.json")
+            stats_obj = DataStatistics(simple_tokenizer, output_path=out)
+            stats_obj.analyze_texts(iter(["Hello world"] * 5))
+            stats_obj.save()
+            assert os.path.exists(out)
+            import json as _json
+            with open(out) as f:
+                data = _json.load(f)
+            assert "total_tokens" in data
+
+    def test_save_no_path_raises(self, simple_tokenizer):
+        from src.data.statistics import DataStatistics
+        stats_obj = DataStatistics(simple_tokenizer)
+        stats_obj.analyze_texts(iter(["hello"] * 3))
+        with pytest.raises(ValueError):
+            stats_obj.save()
+
+
+# ---------------------------------------------------------------------------
+# MultiFileTextDataset tests
+# ---------------------------------------------------------------------------
+
+class TestMultiFileTextDataset:
+    def test_basic_multi_file(self, simple_tokenizer):
+        from src.data.dataset import MultiFileTextDataset
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(3):
+                with open(os.path.join(tmpdir, f"f{i}.txt"), "w") as f:
+                    f.write("\n".join([f"sample text line {j}" for j in range(20)]))
+            ds = MultiFileTextDataset(tmpdir, simple_tokenizer, max_seq_length=32, shuffle=False)
+            assert len(ds.files) == 3
+
+    def test_tf_dataset_output(self, simple_tokenizer):
+        from src.data.dataset import MultiFileTextDataset
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "data.txt"), "w") as f:
+                f.write("\n".join(["word " * 50] * 30))
+            ds = MultiFileTextDataset(tmpdir, simple_tokenizer, max_seq_length=32, shuffle=False)
+            tf_ds = ds.get_tf_dataset(batch_size=4, shuffle=False)
+            for batch in tf_ds.take(1):
+                ids, mask = batch
+                assert ids.dtype == tf.int32
+
+
+# ---------------------------------------------------------------------------
+# DataPreprocessor extended tests (HTML/URL cleaning, deduplication, filtering)
+# ---------------------------------------------------------------------------
+
+class TestDataPreprocessorExtended:
+    def setup_method(self):
+        from src.data.preprocessing import DataPreprocessor
+        self.preprocessor = DataPreprocessor.__new__(DataPreprocessor)
+        self.preprocessor.tokenizer_name = "gpt2"
+        self.preprocessor.max_seq_length = 128
+        self.preprocessor.lowercase = False
+        self.preprocessor.remove_special_chars = False
+        self.preprocessor._tokenizer = None
+
+    def test_html_removal(self):
+        result = self.preprocessor.clean_text("<p>Hello <b>world</b></p>")
+        assert "<" not in result and ">" not in result
+        assert "Hello" in result
+        assert "world" in result
+
+    def test_url_removal(self):
+        result = self.preprocessor.clean_text("Visit https://example.com for more.")
+        assert "https://" not in result
+
+    def test_email_removal(self):
+        result = self.preprocessor.clean_text("Contact user@example.com for help.")
+        assert "@" not in result
+
+    def test_filter_by_length(self):
+        texts = ["hi", "a" * 100, "b" * 200]
+        result = self.preprocessor.filter_by_length(texts, min_length=10, max_length=150)
+        assert len(result) == 1
+        assert result[0] == "a" * 100
+
+    def test_deduplicate_exact(self):
+        texts = ["hello world", "hello world", "unique text"]
+        result = self.preprocessor.deduplicate(texts)
+        assert len(result) == 2
+        assert "hello world" in result
+        assert "unique text" in result
+
+    def test_deduplicate_preserves_order(self):
+        texts = ["a", "b", "a", "c", "b"]
+        result = self.preprocessor.deduplicate(texts)
+        assert result == ["a", "b", "c"]

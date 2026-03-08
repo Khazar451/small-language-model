@@ -1,174 +1,273 @@
 """
-HuggingFace Datasets integration for multi-source data loading.
+HuggingFace Datasets integration for large-scale language model training.
 
-Provides a convenient wrapper around the ``datasets`` library that supports
-sampling from multiple datasets with configurable mixture weights and
-seamless integration with the tf.data pipeline.
+Provides memory-efficient streaming access to datasets hosted on the
+HuggingFace Hub without downloading them entirely to disk.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
+import numpy as np
 import tensorflow as tf
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Registry of popular large-scale pre-training datasets
+# ---------------------------------------------------------------------------
 
-class HuggingFaceDataLoader:
-    """Load and interleave multiple HuggingFace datasets with mixture weights.
+RECOMMENDED_DATASETS: Dict[str, Dict] = {
+    "openwebtext": {
+        "name": "openwebtext",
+        "split": "train",
+        "text_field": "text",
+        "size_gb": 40,
+        "tokens_b": 8,
+        "description": "High-quality web text (~8B tokens)",
+    },
+    "the_pile": {
+        "name": "EleutherAI/pile",
+        "split": "train",
+        "text_field": "text",
+        "size_gb": 825,
+        "tokens_b": 210,
+        "description": "Diverse high-quality text (~210B tokens)",
+    },
+    "slimpajama": {
+        "name": "cerebras/SlimPajama-627B",
+        "split": "train",
+        "text_field": "text",
+        "size_gb": 90,   # ~16 GiB compressed, ~90 GiB uncompressed
+        "tokens_b": 627,
+        "description": "Deduplicated web + code data (~627B tokens, ~90 GiB uncompressed)",
+    },
+    "fineweb": {
+        "name": "HuggingFaceFW/fineweb",
+        "split": "train",
+        "text_field": "text",
+        "size_gb": 5000,
+        "tokens_b": 15000,
+        "description": "Educational web data (~15T tokens)",
+    },
+    "falcon_refinedweb": {
+        "name": "tiiuae/falcon-refinedweb",
+        "split": "train",
+        "text_field": "content",
+        "size_gb": 2800,
+        "tokens_b": 600,
+        "description": "High-quality deduplicated web data (~600B tokens)",
+    },
+}
 
-    Supports streaming mode (no full download required) and produces a
-    ``tf.data.Dataset`` of fixed-length token-ID chunks ready for language
-    model training.
+
+class HuggingFaceLoader:
+    """Load and stream datasets from the HuggingFace Hub.
+
+    Provides memory-efficient access to large datasets. When
+    *streaming=True* (the default) the dataset is never fully
+    downloaded to disk; individual records are fetched on demand.
 
     Args:
-        datasets: List of dataset names accepted by ``datasets.load_dataset``
-            (e.g. ``["wikitext", "openwebtext"]``).
-        weights: Sampling probabilities for each dataset.  Must sum to 1 and
-            have the same length as *datasets*.  Defaults to uniform weights.
-        split: Dataset split to use (default ``"train"``).
-        streaming: Whether to stream data without downloading (default ``True``).
-        text_field: Column name that holds the raw text (default ``"text"``).
-        dataset_configs: Optional mapping from dataset name to its config string
-            (e.g. ``{"wikitext": "wikitext-103-raw-v1"}``).
-        trust_remote_code: Passed directly to ``datasets.load_dataset``.
+        dataset_name: HuggingFace dataset identifier
+            (e.g. ``'openwebtext'``).  Short keys from
+            :data:`RECOMMENDED_DATASETS` are also accepted.
+        tokenizer: HuggingFace-compatible tokenizer instance.
+        split: Dataset split to load (e.g. ``'train'``).
+        subset: Dataset subset / configuration name.
+        text_field: Column name containing the raw text.
+        max_seq_length: Maximum sequence length for tokenized chunks.
+        stride: Sliding-window stride (defaults to *max_seq_length*).
+        streaming: Whether to use HuggingFace streaming mode.
+        max_samples: Maximum number of documents to use.
+        shuffle_buffer_size: Buffer size for element-level shuffling.
+            Set to 0 to disable shuffling.
+        cache_dir: Directory for caching downloaded data.
+        trust_remote_code: Whether to allow remote code in dataset
+            loading scripts.
 
     Example:
         >>> from transformers import AutoTokenizer
         >>> tokenizer = AutoTokenizer.from_pretrained("gpt2")
-        >>> loader = HuggingFaceDataLoader(
-        ...     datasets=["wikitext", "openwebtext"],
-        ...     weights=[0.4, 0.6],
+        >>> loader = HuggingFaceLoader(
+        ...     dataset_name="openwebtext",
+        ...     tokenizer=tokenizer,
         ...     streaming=True,
         ... )
-        >>> train_ds = loader.get_interleaved_dataset(tokenizer, batch_size=8)
+        >>> tf_ds = loader.get_tf_dataset(batch_size=8)
     """
 
     def __init__(
         self,
-        datasets: List[str],
-        weights: Optional[List[float]] = None,
+        dataset_name: str,
+        tokenizer: Any,
         split: str = "train",
-        streaming: bool = True,
+        subset: Optional[str] = None,
         text_field: str = "text",
-        dataset_configs: Optional[Dict[str, str]] = None,
+        max_seq_length: int = 1024,
+        stride: Optional[int] = None,
+        streaming: bool = True,
+        max_samples: Optional[int] = None,
+        shuffle_buffer_size: int = 10000,
+        cache_dir: Optional[str] = None,
         trust_remote_code: bool = False,
     ):
-        if weights is not None and len(weights) != len(datasets):
-            raise ValueError(
-                f"len(weights)={len(weights)} must equal len(datasets)={len(datasets)}"
-            )
-        self.dataset_names = datasets
-        self.weights = weights or [1.0 / len(datasets)] * len(datasets)
+        self.tokenizer = tokenizer
         self.split = split
+        self.subset = subset
+        self.max_seq_length = max_seq_length
+        self.stride = stride or max_seq_length
         self.streaming = streaming
-        self.text_field = text_field
-        self.dataset_configs = dataset_configs or {}
+        self.max_samples = max_samples
+        self.shuffle_buffer_size = shuffle_buffer_size
+        self.cache_dir = cache_dir
         self.trust_remote_code = trust_remote_code
+
+        # Resolve short key → full dataset name / text field
+        if dataset_name in RECOMMENDED_DATASETS:
+            info = RECOMMENDED_DATASETS[dataset_name]
+            self.dataset_name = info["name"]
+            self.text_field = info["text_field"] if text_field == "text" else text_field
+            logger.info(
+                "Loading known dataset '%s': %s",
+                dataset_name,
+                info["description"],
+            )
+        else:
+            self.dataset_name = dataset_name
+            self.text_field = text_field
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _load_hf_datasets(self):
-        """Load and return a list of HuggingFace dataset objects."""
+    def _load_hf_dataset(self):
+        """Return the HuggingFace dataset object."""
         try:
-            from datasets import load_dataset  # type: ignore
+            from datasets import load_dataset  # noqa: PLC0415
         except ImportError as exc:
             raise ImportError(
-                "The 'datasets' package is required. Install it with: pip install datasets"
+                "The 'datasets' package is required. "
+                "Install with: pip install datasets"
             ) from exc
 
-        loaded = []
-        for name in self.dataset_names:
-            cfg = self.dataset_configs.get(name)
-            kwargs: Dict[str, Any] = {
-                "split": self.split,
-                "streaming": self.streaming,
-                "trust_remote_code": self.trust_remote_code,
-            }
-            if cfg:
-                ds = load_dataset(name, cfg, **kwargs)
-            else:
-                ds = load_dataset(name, **kwargs)
-            loaded.append(ds)
-            logger.info("Loaded dataset '%s' (split=%s, streaming=%s)", name, self.split, self.streaming)
-        return loaded
+        load_kwargs: Dict[str, Any] = {
+            "streaming": self.streaming,
+            "trust_remote_code": self.trust_remote_code,
+        }
+        if self.cache_dir:
+            load_kwargs["cache_dir"] = self.cache_dir
 
-    @staticmethod
-    def _interleave(hf_datasets, weights, text_field: str, seed: int = 42):
-        """Interleave multiple HuggingFace datasets using the given weights."""
-        try:
-            from datasets import interleave_datasets  # type: ignore
-        except ImportError as exc:
-            raise ImportError(
-                "The 'datasets' package is required. Install it with: pip install datasets"
-            ) from exc
+        if self.subset:
+            dataset = load_dataset(
+                self.dataset_name,
+                self.subset,
+                split=self.split,
+                **load_kwargs,
+            )
+        else:
+            dataset = load_dataset(
+                self.dataset_name,
+                split=self.split,
+                **load_kwargs,
+            )
 
-        return interleave_datasets(
-            hf_datasets,
-            probabilities=weights,
-            seed=seed,
-            stopping_strategy="all_exhausted",
+        if self.max_samples is not None and not self.streaming:
+            dataset = dataset.select(range(min(self.max_samples, len(dataset))))
+
+        return dataset
+
+    def _tokenize_and_chunk(self, text: str) -> Iterator[np.ndarray]:
+        """Tokenize *text* and yield fixed-length token-ID chunks."""
+        encoding = self.tokenizer(
+            text,
+            return_tensors="np",
+            truncation=False,
+            add_special_tokens=True,
         )
+        all_ids = encoding["input_ids"][0]
+        for start in range(0, len(all_ids), self.stride):
+            end = min(start + self.max_seq_length, len(all_ids))
+            chunk = all_ids[start:end].astype(np.int32)
+            if len(chunk) >= 2:
+                yield chunk
 
-    def _iter_texts(self, hf_datasets, weights):
-        """Yield raw text strings from the interleaved dataset."""
-        merged = self._interleave(hf_datasets, weights, self.text_field)
-        for example in merged:
-            text = example.get(self.text_field, "")
-            if text and text.strip():
-                yield text
+    def _generator(self) -> Iterator[tuple]:
+        """Generator yielding ``(input_ids, attention_mask)`` pairs."""
+        for text in self.stream_texts():
+            for chunk in self._tokenize_and_chunk(text):
+                mask = np.ones(len(chunk), dtype=np.int32)
+                yield chunk, mask
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def get_interleaved_dataset(
+    def stream_texts(self) -> Iterator[str]:
+        """Stream raw text strings from the dataset.
+
+        Yields:
+            Non-empty text strings up to *max_samples* documents.
+        """
+        dataset = self._load_hf_dataset()
+        count = 0
+        for example in dataset:
+            text = example.get(self.text_field, "")
+            if text and text.strip():
+                yield text
+                count += 1
+                if self.max_samples is not None and count >= self.max_samples:
+                    break
+
+    def get_tf_dataset(
         self,
-        tokenizer: Any,
         batch_size: int = 8,
-        max_seq_length: int = 2048,
-        shuffle_buffer: int = 10_000,
-        shuffle: bool = True,
+        repeat: bool = False,
+        prefetch: bool = True,
     ) -> tf.data.Dataset:
-        """Return a batched ``tf.data.Dataset`` from the interleaved sources.
+        """Create a streaming ``tf.data.Dataset`` from the HuggingFace dataset.
 
         Args:
-            tokenizer: HuggingFace tokenizer instance.
             batch_size: Number of examples per batch.
-            max_seq_length: Token chunk length.
-            shuffle_buffer: Shuffle buffer size (used only when *shuffle* is ``True``).
-            shuffle: Whether to shuffle the dataset.
+            repeat: Whether to repeat the dataset indefinitely.
+            prefetch: Whether to prefetch batches asynchronously.
 
         Returns:
-            A batched ``tf.data.Dataset`` with keys ``"input_ids"`` and ``"labels"``.
+            ``tf.data.Dataset`` yielding ``(input_ids, attention_mask)``
+            batches of shape ``(batch_size, seq_len)``.
         """
-        hf_datasets = self._load_hf_datasets()
-        weights = self.weights
-        text_field = self.text_field
-        seq_len = max_seq_length
+        pad_id = int(self.tokenizer.pad_token_id or 0)
 
-        def _generator():
-            buffer = []
-            for text in self._iter_texts(hf_datasets, weights):
-                ids = tokenizer.encode(text, add_special_tokens=False)
-                buffer.extend(ids)
-                while len(buffer) >= seq_len + 1:
-                    chunk = buffer[: seq_len + 1]
-                    buffer = buffer[seq_len:]
-                    input_ids = chunk[:seq_len]
-                    labels = chunk[1:]
-                    yield {"input_ids": input_ids, "labels": labels}
+        dataset = tf.data.Dataset.from_generator(
+            self._generator,
+            output_signature=(
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            ),
+        )
 
-        output_signature = {
-            "input_ids": tf.TensorSpec(shape=(seq_len,), dtype=tf.int32),
-            "labels": tf.TensorSpec(shape=(seq_len,), dtype=tf.int32),
-        }
+        if self.shuffle_buffer_size > 0:
+            dataset = dataset.shuffle(buffer_size=self.shuffle_buffer_size)
 
-        ds = tf.data.Dataset.from_generator(_generator, output_signature=output_signature)
-        if shuffle:
-            ds = ds.shuffle(buffer_size=shuffle_buffer)
-        ds = ds.batch(batch_size, drop_remainder=False)
-        ds = ds.prefetch(tf.data.AUTOTUNE)
-        return ds
+        dataset = dataset.padded_batch(
+            batch_size,
+            padded_shapes=([None], [None]),
+            padding_values=(tf.cast(pad_id, tf.int32), tf.cast(0, tf.int32)),
+        )
+
+        if repeat:
+            dataset = dataset.repeat()
+
+        if prefetch:
+            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
+        return dataset
+
+    @staticmethod
+    def list_recommended() -> Dict[str, Dict]:
+        """Return the registry of recommended pre-training datasets.
+
+        Returns:
+            Mapping from short dataset keys to their metadata.
+        """
+        return dict(RECOMMENDED_DATASETS)

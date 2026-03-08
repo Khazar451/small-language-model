@@ -1,30 +1,63 @@
 data:
-  # Sources: each entry has a path (supports glob patterns) and a sampling weight.
+  # ---------------------------------------------------------------------------
+  # Data sources
+  # ---------------------------------------------------------------------------
   sources:
-    - path: data/openwebtext
-      weight: 0.4
-      format: jsonl
-    - path: data/wikipedia
-      weight: 0.3
-      format: jsonl
-    - path: data/books
-      weight: 0.3
-      format: txt
+    - type: "local"
+      path: "data/train.txt"
+      format: "text"
 
-  tokenizer: gpt2
-  max_seq_length: 2048
+    - type: "local"
+      path: "data/books/"
+      format: "text"
+      recursive: true
 
-  # Streaming mode avoids downloading the full dataset to disk
-  streaming: true
-  buffer_size: 50000
+    # Uncomment to add HuggingFace datasets:
+    # - type: "huggingface"
+    #   dataset: "openwebtext"
+    #   split: "train"
+    #
+    # - type: "huggingface"
+    #   dataset: "the_pile"
+    #   subset: "arxiv"
 
+  # ---------------------------------------------------------------------------
+  # Preprocessing
+  # ---------------------------------------------------------------------------
   preprocessing:
+    clean_text: true
     remove_html: true
-    normalize_whitespace: true
-    filter_min_length: 50
-    filter_max_length: 100000
-    dedup: true
+    remove_urls: true
+    remove_duplicates: true
+    min_length: 50          # minimum character length
+    max_length: 100000      # maximum character length
+    language: "en"          # reserved for future language filtering
+    quality_filter: "high"  # low | medium | high
 
-  tokenizer_cache:
-    enabled: true
-    cache_dir: .token_cache
+  # ---------------------------------------------------------------------------
+  # Tokenization
+  # ---------------------------------------------------------------------------
+  tokenization:
+    tokenizer: "gpt2"
+    max_seq_length: 2048
+    stride: 2048            # set < max_seq_length for overlapping windows
+    cache_dir: ".cache/tokenized_data"
+    num_workers: 8
+
+  # ---------------------------------------------------------------------------
+  # Streaming & Loading
+  # ---------------------------------------------------------------------------
+  loading:
+    streaming: true
+    batch_size: 32
+    shuffle: true
+    shuffle_buffer_size: 10000
+    drop_remainder: false
+    prefetch: true
+    prefetch_size: 2        # tf.data.AUTOTUNE when set to -1
+
+  # ---------------------------------------------------------------------------
+  # Statistics
+  # ---------------------------------------------------------------------------
+  collect_stats: true
+  stats_output: "data/statistics.json"

@@ -20,8 +20,18 @@ A production-grade language model framework in TensorFlow supporting 1B–8B par
   - [Fine-tuning Pre-trained Models](#fine-tuning-pre-trained-models)
   - [Inference](#inference)
   - [Evaluation](#evaluation)
-  - [Download Pre-trained Models](#download-pre-trained-models)
-- [Configuration Examples](#configuration-examples)
+- [Production-Grade Features](#production-grade-features)
+  - [Grouped-Query Attention (GQA)](#grouped-query-attention-gqa)
+  - [Rotary Position Embeddings (RoPE)](#rotary-position-embeddings-rope)
+  - [SwiGLU Feed-Forward Network](#swiglu-feed-forward-network)
+  - [Flash Attention](#flash-attention)
+  - [Gradient Checkpointing](#gradient-checkpointing)
+  - [Mixed Precision Training](#mixed-precision-training)
+  - [Quantization](#quantization)
+  - [Distributed Training](#distributed-training)
+- [Model Architecture](#model-architecture)
+- [Configuration](#configuration)
+- [Data Pipeline](#data-pipeline)
 - [Examples](#examples)
 - [Benchmarks](#benchmarks)
 - [Testing](#testing)
@@ -45,6 +55,7 @@ A production-grade language model framework in TensorFlow supporting 1B–8B par
 - **Memory Optimization**: INT4/INT8 quantization, KV-cache optimization, model sharding
 - **Flexible Inference**: Top-K/Top-P sampling, beam search, greedy decoding, batch inference, optimized inference pipeline
 - **GPU/TPU Support**: Automatic device detection and utilization
+- **Large-Scale Data Pipeline**: Streaming datasets, multi-source loading, HuggingFace Hub integration, tokenization caching, and quality filtering
 
 ---
 
@@ -290,10 +301,10 @@ small-language-model/
 ├── requirements.txt
 ├── setup.py
 ├── config/
-│   ├── model_config.yaml          # Model architecture settings
-│   ├── training_config.yaml       # Training hyperparameters
-│   ├── inference_config.yaml      # Inference settings
-│   └── data_config.yaml           # Data pipeline settings
+│   ├── model_config.yaml        # Model architecture settings (inc. 1B-8B presets)
+│   ├── training_config.yaml     # Training hyperparameters
+│   ├── inference_config.yaml    # Inference settings
+│   └── data_config.yaml         # Data pipeline configuration
 ├── src/
 │   ├── __init__.py
 │   ├── model/
@@ -304,33 +315,30 @@ small-language-model/
 │   │   └── quantization.py         # INT4/INT8 quantization
 │   ├── data/
 │   │   ├── __init__.py
-│   │   ├── dataset.py              # Dataset classes
-│   │   ├── preprocessing.py        # Text preprocessing utilities
-│   │   ├── streaming_dataset.py    # Streaming large-scale datasets
-│   │   ├── huggingface_loader.py   # Multi-source HuggingFace integration
-│   │   ├── tokenizer_cache.py      # Disk-backed tokenization cache
-│   │   └── statistics.py           # Dataset statistics and analysis
+│   │   ├── dataset.py            # Dataset classes (incl. MultiFileTextDataset)
+│   │   ├── preprocessing.py      # Text preprocessing & quality filtering
+│   │   ├── streaming_dataset.py  # Streaming multi-file/dir data loader
+│   │   ├── huggingface_loader.py # HuggingFace Hub integration
+│   │   ├── tokenizer_cache.py    # Tokenization caching to disk
+│   │   └── statistics.py         # Data analysis and monitoring
 │   ├── training/
 │   │   ├── __init__.py
-│   │   ├── trainer.py              # Training loop
-│   │   ├── metrics.py              # Metrics tracking
-│   │   └── distributed.py          # Distributed training utilities
+│   │   ├── trainer.py            # Training loop (with throughput tracking)
+│   │   └── metrics.py            # Metrics tracking
 │   └── inference/
 │       ├── __init__.py
 │       ├── predictor.py            # High-level inference interface
 │       ├── utils.py                # Sampling utilities
 │       └── optimized_inference.py  # Optimized inference with KV-cache
 ├── scripts/
-│   ├── train.py                    # Train from scratch
-│   ├── train_3b_model.py           # End-to-end 3B model training
-│   ├── finetune_pretrained.py      # Fine-tune pre-trained models
-│   ├── evaluate.py                 # Model evaluation
-│   ├── inference.py                # Run inference
-│   ├── download_model.py           # Download HuggingFace models
-│   ├── prepare_data.py             # Prepare and preprocess datasets
-│   ├── download_datasets.py        # Download public datasets
-│   ├── analyze_data.py             # Dataset statistics and analysis
-│   └── quantize_model.py           # Post-training quantization
+│   ├── train.py                  # Train from scratch
+│   ├── finetune_pretrained.py    # Fine-tune pre-trained models
+│   ├── evaluate.py               # Model evaluation
+│   ├── inference.py              # Run inference
+│   ├── download_model.py         # Download HuggingFace models
+│   ├── prepare_data.py           # Download & prepare datasets
+│   ├── download_datasets.py      # Download popular LM datasets
+│   └── analyze_data.py           # Generate data statistics
 ├── examples/
 │   ├── text_generation_example.py
 │   ├── qa_example.py
@@ -1002,100 +1010,161 @@ pytest tests/ -v --cov=src --cov-report=html
 
 ---
 
-## Troubleshooting
+## Data Pipeline
 
-### Out-of-Memory (OOM) Errors
+The repository ships a high-throughput data loading stack suitable for training on 1–100 billion token datasets.
 
-**Symptom**: `ResourceExhaustedError: OOM when allocating tensor`
+### Supported Data Sources
 
-**Solutions**:
-1. Reduce `batch_size` in `config/training_config.yaml`
-2. Increase `gradient_accumulation_steps` to maintain effective batch size
-3. Enable gradient checkpointing: set `gradient_checkpointing: true`
-4. Switch to a lower-precision dtype: `mixed_precision: bf16`
-5. Quantize the model to INT8 or INT4 before inference
+| Source | Formats | Class |
+|--------|---------|-------|
+| Single file | `.txt`, `.jsonl`, `.parquet`, `.arrow` | `TextDataset` |
+| Multiple files / directories | all of the above | `StreamingTextDataset`, `MultiFileTextDataset` |
+| HuggingFace Hub | streaming or cached | `HuggingFaceLoader` |
 
-### Slow Training
+### Streaming from Local Files
 
-**Symptom**: Training throughput much lower than benchmark values.
+```python
+from src.data.streaming_dataset import StreamingTextDataset
+from transformers import AutoTokenizer
 
-**Solutions**:
-1. Verify GPU utilisation with `nvidia-smi`; if < 80%, increase `batch_size`
-2. Enable mixed precision training (`bf16` preferred on Ampere GPUs)
-3. Enable `use_flash_attention: true` in the model config
-4. Set `pin_memory: true` and use multiple data-loader workers
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer.pad_token = tokenizer.eos_token
 
-### Training Loss Not Decreasing
+# Stream from a whole directory (recursively)
+dataset = StreamingTextDataset(
+    paths="data/books/",
+    tokenizer=tokenizer,
+    max_seq_length=2048,
+    recursive=True,
+    shuffle=True,
+)
+tf_ds = dataset.get_tf_dataset(batch_size=32)
+```
 
-**Solutions**:
-1. Check that the learning rate is not too high — try `1e-4` to `3e-4` for large models
-2. Ensure warmup steps are proportional to dataset size (typically 1–2% of total steps)
-3. Verify the tokenizer `pad_token` is correctly set (`tokenizer.pad_token = tokenizer.eos_token`)
-4. Inspect data preprocessing — filter very short or very long sequences
+### Multiple Files via MultiFileTextDataset
 
-### Checkpoint Loading Fails
+```python
+from src.data.dataset import MultiFileTextDataset
 
-**Symptom**: Errors when loading saved weights.
+# Combine a directory and an explicit JSONL file
+dataset = MultiFileTextDataset(
+    paths=["data/books/", "data/web.jsonl"],
+    tokenizer=tokenizer,
+    max_seq_length=1024,
+    recursive=True,
+)
+tf_ds = dataset.get_tf_dataset(batch_size=16, shuffle=True)
+```
 
-**Solutions**:
-1. Ensure the model config matches the one used during training
-2. Use `.weights.h5` extension for Keras 3 weight files: `model.save_weights("path.weights.h5")`
-3. If resuming training, set `resume_from_checkpoint: true` in the training config
+### HuggingFace Hub Integration
 
-### Distributed Training Hangs
+```python
+from src.data.huggingface_loader import HuggingFaceLoader
 
-**Solutions**:
-1. Verify all GPUs are visible: `python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"`
-2. Check NCCL version compatibility with your CUDA installation
-3. Reduce `num_gpus` and test with `strategy: mirrored` before moving to multi-node
+# Stream OpenWebText without downloading the full dataset
+loader = HuggingFaceLoader(
+    dataset_name="openwebtext",  # short key from RECOMMENDED_DATASETS
+    tokenizer=tokenizer,
+    max_seq_length=1024,
+    streaming=True,             # never loads full dataset into RAM
+    max_samples=1_000_000,
+)
+tf_ds = loader.get_tf_dataset(batch_size=32)
 
----
+# List available pre-training datasets
+HuggingFaceLoader.list_recommended()
+```
 
-## Performance Tips
+### Tokenization Caching
 
-### Training
+```python
+from src.data.tokenizer_cache import TokenizerCache
+from src.data.streaming_dataset import StreamingTextDataset
 
-- **Effective batch size**: Use `gradient_accumulation_steps` to reach an effective batch size of 256–2048 tokens per step without increasing per-GPU memory.
-- **Learning rate scaling**: Scale the learning rate linearly with the effective batch size (e.g., double the batch size → double the LR).
-- **BF16 over FP16**: On Ampere GPUs (A100, RTX 30xx), prefer `bf16` — it has the same dynamic range as `fp32` and avoids gradient overflow.
-- **Flash Attention**: Always enable `use_flash_attention: true` for sequences longer than 512 tokens.
-- **GQA**: For models ≥ 3B parameters, use `num_kv_heads = num_heads // 4` to reduce KV-cache memory by 4×.
+cache = TokenizerCache(
+    cache_dir=".cache/tokenized",
+    tokenizer=tokenizer,
+    max_seq_length=2048,
+)
 
-### Inference
+if not cache.is_cached():
+    src = StreamingTextDataset("data/", tokenizer, max_seq_length=2048, shuffle=False)
+    cache.tokenize_texts(src.stream_texts())
 
-- **KV-cache**: Enable `use_kv_cache=True` in `OptimizedPredictor` for autoregressive generation — avoids redundant attention computation.
-- **Batch generation**: Batch multiple prompts together (`generate_batch`) for significantly higher GPU utilisation than sequential generation.
-- **Quantization**: INT8 quantization reduces model size by ~50% with minimal quality loss. INT4 reduces by ~75% with slightly more degradation.
-- **Sequence length**: Set `max_new_tokens` conservatively — longer sequences increase latency quadratically without Flash Attention.
+tf_ds = cache.get_tf_dataset(batch_size=32, shuffle=True)
+print(cache.get_stats())  # {"total_chunks": ..., "total_tokens": ..., ...}
+```
 
----
+### Quality Filtering & Deduplication
 
-## Contributing
+```python
+from src.data.preprocessing import DataPreprocessor
 
-Contributions are welcome! Please follow these steps:
+preprocessor = DataPreprocessor()
 
-1. Fork the repository and create a feature branch
-2. Write tests for any new functionality
-3. Ensure all existing tests pass: `pytest tests/ -v`
-4. Format code with `black` and lint with `flake8`
-5. Open a pull request with a clear description of the changes
+texts = [...]
+texts = preprocessor.clean_texts(texts)            # HTML, URL, e-mail removal
+texts = preprocessor.filter_by_length(texts, 50, 100_000)
+texts = preprocessor.deduplicate(texts)
+```
 
----
+### Data Statistics
 
-## License
+```python
+from src.data.statistics import DataStatistics
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+stats = DataStatistics(tokenizer, output_path="data/statistics.json")
+stats.analyze_texts(iter(texts))
+stats.save()
+print(stats.get_stats()["tokens_per_text"])
+```
 
----
+### Data Preparation Scripts
 
-## Citation
+```bash
+# Prepare and split a local directory into train/val/test
+python scripts/prepare_data.py local \
+    --path data/raw/ --output data/prepared/ --deduplicate
 
-If you use this project in your research, please cite:
+# Download OpenWebText (first 100 000 documents)
+python scripts/prepare_data.py huggingface \
+    --dataset openwebtext \
+    --max-samples 100000 \
+    --output data/openwebtext_100k.jsonl
 
-```bibtex
-@software{small_language_model,
-  title  = {Small Language Model: A Production-Grade Transformer Framework},
-  year   = {2024},
-  url    = {https://github.com/Khazar451/small-language-model},
-}
+# List and download recommended large-scale datasets
+python scripts/download_datasets.py --list
+python scripts/download_datasets.py openwebtext slimpajama \
+    --max-samples 50000 --output data/
+
+# Compute and save data statistics
+python scripts/analyze_data.py \
+    --path data/train.txt \
+    --output data/statistics.json
+```
+
+### Data Configuration (`config/data_config.yaml`)
+
+```yaml
+data:
+  sources:
+    - type: "local"
+      path: "data/train.txt"
+    - type: "local"
+      path: "data/books/"
+      recursive: true
+  preprocessing:
+    clean_text: true
+    remove_duplicates: true
+    min_length: 50
+    max_length: 100000
+  tokenization:
+    tokenizer: "gpt2"
+    max_seq_length: 2048
+    cache_dir: ".cache/tokenized_data"
+  loading:
+    streaming: true
+    batch_size: 32
+    shuffle: true
 ```

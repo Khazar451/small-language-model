@@ -1,100 +1,130 @@
+#!/usr/bin/env python3
 """
-Analyze a text dataset and print statistics.
+Generate statistics for training data (token distribution, vocabulary, etc.).
 
-Usage:
-    python scripts/analyze_data.py --input_dir data/processed --tokenizer gpt2
-    python scripts/analyze_data.py --file data/train.txt --tokenizer gpt2
+Reads from local files or a previously tokenized cache and writes a
+human-readable JSON report.
+
+Usage
+-----
+# Analyse local text files
+python scripts/analyze_data.py --path data/train.txt --output data/statistics.json
+
+# Analyse a directory recursively
+python scripts/analyze_data.py --path data/ --recursive --output data/statistics.json
+
+# Limit analysis to 10 000 texts
+python scripts/analyze_data.py --path data/ --sample-size 10000
 """
 
 import argparse
-import glob
 import logging
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from transformers import AutoTokenizer
-
-from src.data.statistics import DatasetStatistics
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compute and report dataset statistics")
-    parser.add_argument("--input_dir", default=None, help="Directory with .txt or .jsonl files")
-    parser.add_argument("--file", default=None, help="Single file to analyze")
-    parser.add_argument("--tokenizer", default="gpt2")
-    parser.add_argument("--sample_size", type=int, default=10_000,
-                        help="Max documents to analyze (0 = all)")
-    parser.add_argument("--max_seq_length", type=int, default=2048,
-                        help="Sequence length for chunk estimation")
-    return parser.parse_args()
-
-
-def load_texts(input_dir: str = None, file: str = None) -> list:
-    """Return a list of text strings from files."""
-    import json
-
-    texts = []
-    paths = []
-
-    if file:
-        paths = [file]
-    elif input_dir:
-        for ext in ("*.txt", "*.jsonl"):
-            paths.extend(sorted(glob.glob(os.path.join(input_dir, "**", ext), recursive=True)))
-
-    for path in paths:
-        ext = os.path.splitext(path)[-1].lower()
-        try:
-            with open(path, encoding="utf-8") as fh:
-                if ext == ".jsonl":
-                    for line in fh:
-                        line = line.strip()
-                        if line:
-                            try:
-                                texts.append(json.loads(line).get("text", ""))
-                            except json.JSONDecodeError:
-                                continue
-                else:
-                    texts.append(fh.read())
-        except OSError as exc:
-            logger.warning("Could not read %s: %s", path, exc)
-
-    logger.info("Loaded %d documents from %d files", len(texts), len(paths))
-    return texts
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Compute statistics for language model training data."
+    )
+    parser.add_argument(
+        "--path",
+        required=True,
+        help="File, directory, or glob pattern to analyse.",
+    )
+    parser.add_argument(
+        "--output",
+        default="data/statistics.json",
+        help="Path to write the JSON statistics report.",
+    )
+    parser.add_argument(
+        "--tokenizer",
+        default="gpt2",
+        help="HuggingFace tokenizer name (default: gpt2).",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recurse into subdirectories.",
+    )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        default=0,
+        dest="sample_size",
+        help="Analyse only this many texts (0 = all).",
+    )
+    parser.add_argument(
+        "--text-field",
+        default="text",
+        dest="text_field",
+        help="JSON field for text in .jsonl files.",
+    )
+    return parser
 
 
 def main() -> None:
-    args = parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
 
-    if not args.input_dir and not args.file:
-        logger.error("Provide --input_dir or --file")
+    # Load tokenizer
+    try:
+        from transformers import AutoTokenizer  # noqa: PLC0415
+
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+    except ImportError:
+        logger.error("transformers required: pip install transformers")
         sys.exit(1)
 
-    texts = load_texts(args.input_dir, args.file)
-    if not texts:
-        logger.error("No text documents found")
+    from src.data.streaming_dataset import StreamingTextDataset, collect_files
+    from src.data.statistics import DataStatistics
+
+    files = collect_files(args.path, recursive=args.recursive)
+    if not files:
+        logger.error("No supported files found in: %s", args.path)
         sys.exit(1)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    sample_size = args.sample_size if args.sample_size > 0 else None
+    logger.info("Analysing %d file(s) …", len(files))
 
-    stats = DatasetStatistics(tokenizer=tokenizer, sample_size=sample_size)
-    report = stats.compute(texts)
-    DatasetStatistics.print_report(report)
+    def _stream_texts():
+        ds = StreamingTextDataset(
+            paths=args.path,
+            tokenizer=tokenizer,  # tokenizer only used for chunking; we stream raw text here
+            max_seq_length=512,
+            recursive=args.recursive,
+            shuffle=False,
+            text_field=args.text_field,
+        )
+        yield from ds.stream_texts()
 
-    est = stats.estimate_training_tokens(texts, max_seq_length=args.max_seq_length)
-    print(f"\nTraining chunk estimate (seq_len={args.max_seq_length}):")
-    print(f"  Total tokens  : {est['total_tokens']:,}")
-    print(f"  Num chunks    : {est['num_chunks']:,}")
-    print(f"  Steps / epoch : {est['estimated_steps_per_epoch']:,} (batch_size=1)")
+    stats = DataStatistics(tokenizer, output_path=args.output)
+    result = stats.analyze_texts(
+        _stream_texts(),
+        sample_size=args.sample_size or None,
+    )
+
+    if not result:
+        logger.error("No data was analysed.")
+        sys.exit(1)
+
+    stats.save()
+
+    print("\n=== Data Statistics ===")
+    print(f"  Texts analysed : {result['num_texts']:,}")
+    print(f"  Empty texts    : {result['num_empty']:,}")
+    print(f"  Total tokens   : {result['total_tokens']:,}")
+    tpt = result["tokens_per_text"]
+    print(f"  Tokens / text  : mean={tpt['mean']:.1f}  median={tpt['median']:.1f}  "
+          f"min={tpt['min']}  max={tpt['max']}")
+    print(f"  Unique tokens  : {result['vocabulary']['unique_tokens_seen']:,}")
+    print(f"\nReport saved to: {args.output}\n")
 
 
 if __name__ == "__main__":
